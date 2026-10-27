@@ -1,3 +1,3 @@
 # mindcare-backend
 
-See [GUIDE.md](GUIDE.md) for Docker-based setup and run instructions.
+See [DEVELOP_GUIDE.md](DEVELOP_GUIDE.md) for local development setup and run instructions.

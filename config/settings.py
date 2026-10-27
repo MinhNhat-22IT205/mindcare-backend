@@ -12,9 +12,13 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 
 import os
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
+
+from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / '.env')
 
 
 # Quick-start development settings - unsuitable for production
@@ -32,6 +36,7 @@ ALLOWED_HOSTS = os.getenv('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1').split('
 # Application definition
 
 INSTALLED_APPS = [
+    'mindcare.apps.MindcareConfig',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -74,12 +79,31 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+DATABASE_URL = os.getenv('DATABASE_URL')
+if DATABASE_URL:
+    parsed_database_url = urlparse(DATABASE_URL)
+    database_options = parse_qs(parsed_database_url.query)
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': unquote(parsed_database_url.path.lstrip('/')),
+            'USER': unquote(parsed_database_url.username or ''),
+            'PASSWORD': unquote(parsed_database_url.password or ''),
+            'HOST': parsed_database_url.hostname or '',
+            'PORT': parsed_database_url.port or '',
+            'OPTIONS': {
+                key: values[-1]
+                for key, values in database_options.items()
+            },
+        }
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
 
 
 # Password validation
@@ -122,3 +146,22 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# Analysis policy can be tuned per environment without changing service code.
+MINDCARE_ANALYSIS_CONFIG = {
+    'LIGHT_WINDOW_DAYS': int(os.getenv('MINDCARE_LIGHT_WINDOW_DAYS', '7')),
+    'COMPARISON_WINDOW_DAYS': int(os.getenv('MINDCARE_COMPARISON_WINDOW_DAYS', '7')),
+    'CHANGE_THRESHOLD': float(os.getenv('MINDCARE_CHANGE_THRESHOLD', '2')),
+    'CHANGE_METRICS': tuple(os.getenv(
+        'MINDCARE_CHANGE_METRICS', 'stress_level,mood_level,anxiety_level'
+    ).split(',')),
+    'LIGHT_MINIMUM_CHECKINS': int(os.getenv('MINDCARE_LIGHT_MINIMUM_CHECKINS', '3')),
+    'DEEP_MINIMUM_CHECKINS': int(os.getenv('MINDCARE_DEEP_MINIMUM_CHECKINS', '3')),
+    'CHAT_BATCH_SIZE': int(os.getenv('MINDCARE_CHAT_BATCH_SIZE', '5')),
+    'CHAT_BATCH_WINDOW_HOURS': int(os.getenv('MINDCARE_CHAT_BATCH_WINDOW_HOURS', '24')),
+    'DEEP_WINDOW_DAYS': int(os.getenv('MINDCARE_DEEP_WINDOW_DAYS', '35')),
+    'WEEKLY_BUCKET_LIMIT': int(os.getenv('MINDCARE_WEEKLY_BUCKET_LIMIT', '5')),
+}
+MINDCARE_SAFETY_DETECTOR = os.getenv('MINDCARE_SAFETY_DETECTOR')
+MINDCARE_DEEP_ANALYZER = os.getenv('MINDCARE_DEEP_ANALYZER')
+MINDCARE_SAFETY_ALERT_OPEN_STATUS = os.getenv('MINDCARE_SAFETY_ALERT_OPEN_STATUS', 'open')
