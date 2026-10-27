@@ -17,7 +17,11 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import include, path
 
+from mindcare.api.swagger import openapi_schema, swagger_ui
+
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('api/v1/openapi.json', openapi_schema, name='openapi-schema'),
+    path('api/v1/docs/', swagger_ui, name='swagger-ui'),
     path('api/v1/', include('mindcare.api.urls')),
 ]

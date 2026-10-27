@@ -103,6 +103,13 @@ Safety screening cần adapter riêng qua `MINDCARE_SAFETY_DETECTOR`. Adapter nh
 
 ## API `/api/v1`
 
+Swagger UI có tại http://127.0.0.1:8000/api/v1/docs/ và OpenAPI JSON có tại
+http://127.0.0.1:8000/api/v1/openapi.json. Swagger tự mở chế độ Try it out và
+điền sẵn body/query/path parameter. Bấm **Tạo/đăng nhập tài khoản test** để tạo
+tài khoản thử nghiệm, đăng nhập và tự gắn Bearer token cho các API cần xác thực.
+Các ID trả về khi tạo check-in, journal, chat session, analysis run, contact hoặc
+alert cũng được Swagger ghi nhớ để thay cho ID mẫu ở các request tiếp theo.
+
 Các route trong `API_Doc.md` đã được nối vào Django. Dữ liệu journal, chat, contact, safety plan và lý do yêu cầu hỗ trợ dùng Fernet; trước khi ghi/đọc các dữ liệu đó, đặt `MINDCARE_DATA_ENCRYPTION_KEY` thành một khóa Fernet riêng, lưu ngoài database. Có thể tạo khóa bằng:
 
 ```bash

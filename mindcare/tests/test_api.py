@@ -13,6 +13,7 @@ from django.utils import timezone
 from django.urls import resolve
 
 from mindcare.api.common import encrypt, token_for
+from mindcare.api.swagger import build_openapi_schema
 from mindcare.models import (AnalysisReport, AnalysisRun, AnalysisSource, CheckIn,
                              ChatMessage, JournalEntry, SafetyAlert, TrustedContact, User)
 from mindcare.services.deep_analysis import DeepAnalysisService
@@ -243,6 +244,30 @@ class RouteContractTests(SimpleTestCase):
             sample = re.sub(r'\{\w+\}', '11111111-1111-4111-8111-111111111111', path)
             with self.subTest(method=method, path=path):
                 self.assertIn(method, resolve('/api/v1' + sample).func.allowed_methods)
+
+    def test_swagger_documents_every_operation_with_prefilled_writes(self):
+        schema = build_openapi_schema()
+        operations = [
+            operation
+            for path_item in schema['paths'].values()
+            for method, operation in path_item.items()
+            if method in {'get', 'post', 'put', 'patch', 'delete'}
+        ]
+        self.assertEqual(len(operations), 67)
+        for operation in operations:
+            method = operation['operationId'].split('_', 1)[0]
+            if method in {'post', 'put', 'patch'}:
+                media = operation['requestBody']['content']['application/json']
+                self.assertIn('example', media)
+
+    def test_swagger_pages_are_available(self):
+        response = self.client.get('/api/v1/openapi.json')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['openapi'], '3.0.3')
+        response = self.client.get('/api/v1/docs/')
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'Tạo/đăng nhập tài khoản test')
+        self.assertContains(response, 'tryItOutEnabled: true')
 
 
 def no_signal(_text):
