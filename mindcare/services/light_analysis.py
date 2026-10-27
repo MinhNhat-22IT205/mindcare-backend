@@ -4,6 +4,7 @@ from django.core.exceptions import FieldDoesNotExist
 from django.db import models, transaction
 from django.utils import timezone
 
+from mindcare.api.common import consent
 from mindcare.models import (
     AnalysisRun,
     AnalysisSource,
@@ -28,6 +29,8 @@ class LightAnalysisService:
     @classmethod
     def analyze_chat_batch(cls, message: ChatMessage, detector=None, now=None):
         cls.screen_message(message, detector=detector)
+        if not consent(message.session.user, 'ai_chat'):
+            return {'status': 'CONSENT_REQUIRED'}
         policy = get_analysis_policy()
         recent_count = ChatMessage.objects.filter(
             session=message.session,
@@ -44,16 +47,18 @@ class LightAnalysisService:
         policy = get_analysis_policy()
         start = now - timedelta(days=policy.light_window_days)
         prior_start = start - timedelta(days=policy.comparison_window_days)
+        if not any(consent(user, scope) for scope in ('ai_checkin', 'ai_journal', 'ai_chat')):
+            raise PermissionError('Analysis requires a current source consent.')
         checkins = list(CheckIn.objects.filter(
             user=user, recorded_at__gte=prior_start, recorded_at__lt=now
-        ).order_by('recorded_at'))
+        ).order_by('recorded_at')) if consent(user, 'ai_checkin') else []
         recent = [item for item in checkins if item.recorded_at >= start]
         journals = list(JournalEntry.objects.filter(
             user=user, experienced_at__gte=start, experienced_at__lte=now
-        ).order_by('experienced_at'))
+        ).order_by('experienced_at')) if consent(user, 'ai_journal') else []
         messages = list(ChatMessage.objects.filter(
             session__user=user, created_at__gte=start, created_at__lte=now
-        ).order_by('created_at'))
+        ).order_by('created_at')) if consent(user, 'ai_chat') else []
 
         missing_fields = []
         if not recent:
@@ -71,6 +76,7 @@ class LightAnalysisService:
         run = AnalysisRun.objects.create(
             user=user,
             analysis_type='light',
+            trigger_source='chat' if trigger_message else 'check_in',
             status='completed',
             period_start=start,
             period_end=now,
@@ -106,8 +112,8 @@ class LightAnalysisService:
                 raise ValueError(f'Configured change metric {metric!r} is not a CheckIn field.')
             if not isinstance(field, (models.IntegerField, models.FloatField, models.DecimalField)):
                 raise ValueError(f'Configured change metric {metric!r} must be numeric.')
-            current_values = [getattr(item, metric) for item in recent]
-            older_values = [getattr(item, metric) for item in older]
+            current_values = [getattr(item, metric) for item in recent if getattr(item, metric) is not None]
+            older_values = [getattr(item, metric) for item in older if getattr(item, metric) is not None]
             if not current_values or not older_values:
                 continue
             current_avg = sum(current_values) / len(current_values)

@@ -4,7 +4,9 @@ from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.utils import timezone
+from django.conf import settings
 
+from mindcare.api.common import consent, decrypt
 from mindcare.models import (
     AnalysisReport,
     AnalysisRun,
@@ -25,19 +27,23 @@ class DeepAnalysisService:
 
     @classmethod
     @transaction.atomic
-    def run(cls, user, trigger, analyzer=None, model_version='', now=None):
+    def run(cls, user, trigger, analyzer=None, model_version='', now=None, run_id=None):
         now = now or timezone.now()
         policy = get_analysis_policy()
-        start = now - timedelta(days=policy.deep_window_days)
+        existing = AnalysisRun.objects.select_for_update().get(id=run_id, user=user) if run_id else None
+        start = existing.period_start if existing else now - timedelta(days=policy.deep_window_days)
+        end = existing.period_end if existing else now
+        if not any(consent(user, scope) for scope in ('ai_checkin', 'ai_journal', 'ai_chat')):
+            raise PermissionError('Analysis requires a current source consent.')
         checkins = list(CheckIn.objects.filter(
-            user=user, recorded_at__gte=start, recorded_at__lte=now
-        ).order_by('recorded_at'))
+            user=user, recorded_at__gte=start, recorded_at__lt=end
+        ).order_by('recorded_at')) if consent(user, 'ai_checkin') else []
         journals = list(JournalEntry.objects.filter(
-            user=user, experienced_at__gte=start, experienced_at__lte=now
-        ).order_by('experienced_at'))
+            user=user, experienced_at__gte=start, experienced_at__lt=end
+        ).order_by('experienced_at')) if consent(user, 'ai_journal') else []
         messages = list(ChatMessage.objects.filter(
-            session__user=user, created_at__gte=start, created_at__lte=now
-        ).order_by('created_at'))
+            session__user=user, created_at__gte=start, created_at__lt=end
+        ).order_by('created_at')) if consent(user, 'ai_chat') else []
 
         missing_fields = []
         if not checkins:
@@ -49,7 +55,7 @@ class DeepAnalysisService:
         report_data = analyzer(context)
         if not isinstance(report_data, dict):
             raise ValueError('Deep analysis adapter must return a dictionary.')
-        required_report_fields = {'emotion_summary', 'risk_level', 'summary', 'recommendations'}
+        required_report_fields = {'emotion_summary', 'concern_level', 'summary', 'recommendations'}
         missing_report_fields = required_report_fields - report_data.keys()
         if missing_report_fields:
             raise ValueError(
@@ -57,24 +63,32 @@ class DeepAnalysisService:
                 + ', '.join(sorted(missing_report_fields))
             )
 
-        run = AnalysisRun.objects.create(
-            user=user,
-            analysis_type='deep',
+        run_fields = dict(
             status='completed',
-            period_start=start,
-            period_end=now,
             sufficiency_status='sufficient' if len(checkins) >= policy.deep_minimum_checkins else 'insufficient',
             missing_fields=missing_fields,
             data_quality={
                 'check_ins': len(checkins),
+                'observed_days': len({item.checkin_date for item in checkins}),
                 'journal_entries': len(journals),
                 'chat_messages': len(messages),
                 'limitations': missing_fields,
                 'trigger': trigger,
             },
             model_version=model_version,
+            pipeline_version=settings.MINDCARE_PIPELINE_VERSION,
             completed_at=now,
         )
+        if existing:
+            if existing.status != 'running':
+                raise ValueError('Analysis run is not running.')
+            for field, value in run_fields.items():
+                setattr(existing, field, value)
+            existing.save(update_fields=list(run_fields))
+            run = existing
+        else:
+            run = AnalysisRun.objects.create(user=user, analysis_type='deep',
+                trigger_source=str(trigger)[:64], period_start=start, period_end=end, **run_fields)
         emotion_summary = report_data['emotion_summary']
         if not isinstance(emotion_summary, dict):
             raise ValueError('Deep analysis adapter emotion_summary must be a dictionary.')
@@ -83,11 +97,15 @@ class DeepAnalysisService:
             'dangerous_signals': report_data.get('dangerous_signals', []),
             'limitations': missing_fields,
         })
+        if ((checkins and not consent(user, 'ai_checkin')) or
+                (journals and not consent(user, 'ai_journal')) or
+                (messages and not consent(user, 'ai_chat'))):
+            raise PermissionError('Source consent was revoked during analysis.')
         report = AnalysisReport.objects.create(
             analysis_run=run,
             emotion_summary=emotion_summary,
             trend_metrics=context['stress_trend'],
-            concern_level=report_data['risk_level'],
+            concern_level=report_data['concern_level'],
             summary=report_data['summary'],
             contributing_factors=report_data.get('contributing_factors', []),
             recommendations=report_data['recommendations'],
@@ -95,12 +113,30 @@ class DeepAnalysisService:
         cls._save_sources(run, checkins, journals, messages)
         return {'analysis_run': run, 'report': report, 'context': context}
 
+    @classmethod
+    def run_for_queued(cls, run_id, analyzer=None):
+        """Entry point for a configured job worker; failures stay visible to polling clients."""
+        with transaction.atomic():
+            run = AnalysisRun.objects.select_for_update().get(id=run_id, status='queued',
+                                                               analysis_type='deep')
+            run.status = 'running'
+            run.save(update_fields=['status'])
+        try:
+            return cls.run(run.user, trigger=run.trigger_source, analyzer=analyzer,
+                           run_id=run.id)
+        except Exception:
+            AnalysisRun.objects.filter(id=run.id, status='running').update(
+                status='failed', completed_at=timezone.now())
+            raise
+
     @staticmethod
     def _context(checkins, journals, messages, timezone_name):
         user_timezone = ZoneInfo(timezone_name)
         by_day = defaultdict(list)
         by_week = defaultdict(list)
         for item in checkins:
+            if item.stress_level is None:
+                continue
             local_recorded_at = item.recorded_at.astimezone(user_timezone)
             day = local_recorded_at.date().isoformat()
             by_day[day].append(item.stress_level)
@@ -138,12 +174,12 @@ class DeepAnalysisService:
                 for item in checkins
             ],
             'journals': [
-                {'id': str(item.id), 'experienced_at': item.experienced_at.isoformat(), 'content': item.content}
+                {'id': str(item.id), 'experienced_at': item.experienced_at.isoformat(), 'content': decrypt(item.content)}
                 for item in journals
             ],
             'chat_messages': [
                 {'id': str(item.id), 'created_at': item.created_at.isoformat(),
-                 'role': item.role, 'content': item.content}
+                 'role': item.role, 'content': decrypt(item.content)}
                 for item in messages
             ],
         }

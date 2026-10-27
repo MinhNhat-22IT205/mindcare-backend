@@ -91,7 +91,7 @@ Deep Analysis cần adapter LLM được cấu hình qua `MINDCARE_DEEP_ANALYZER
 ```python
 {
     "emotion_summary": {},
-    "risk_level": "...",
+    "concern_level": "...",
     "summary": "...",
     "recommendations": [],
     "contributing_factors": [],  # tùy chọn
@@ -100,3 +100,25 @@ Deep Analysis cần adapter LLM được cấu hình qua `MINDCARE_DEEP_ANALYZER
 ```
 
 Safety screening cần adapter riêng qua `MINDCARE_SAFETY_DETECTOR`. Adapter nhận nội dung một tin nhắn và trả về `None`, hoặc dictionary gồm `severity` và `reason`. Service gọi detector trên từng tin nhắn, không đợi gom batch. Khi chưa cấu hình adapter, workflow tương ứng báo lỗi cấu hình thay vì dùng bộ từ khóa hoặc kết quả phân tích giả định.
+
+## API `/api/v1`
+
+Các route trong `API_Doc.md` đã được nối vào Django. Dữ liệu journal, chat, contact, safety plan và lý do yêu cầu hỗ trợ dùng Fernet; trước khi ghi/đọc các dữ liệu đó, đặt `MINDCARE_DATA_ENCRYPTION_KEY` thành một khóa Fernet riêng, lưu ngoài database. Có thể tạo khóa bằng:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Giữ khóa để giải mã dữ liệu cũ; không thay khóa trực tiếp khi đã có dữ liệu. Nếu database đang chứa plaintext từ POC, chạy lệnh `python manage.py encrypt_legacy_data` sau khi đã cấu hình khóa và sao lưu dữ liệu.
+
+Các tích hợp chưa có sẵn trong repository cần cấu hình adapter theo dotted path:
+
+- `MINDCARE_ANALYSIS_ENQUEUE(run_id)`: đưa run đã lưu vào worker; worker gọi `DeepAnalysisService.run_for_queued(run_id)`. Chưa cấu hình thì POST analysis trả 503 và không tạo job treo.
+- `MINDCARE_SAFETY_DETECTOR(text)`: trả `None` hoặc `{severity, reason}`. Thiếu detector thì gửi chat trả 503.
+- `MINDCARE_CHAT_RESPONDER(context)`: trả `content`, tùy chọn `intent`, `action`, `rag_used`, `checkin_proposal`; `MINDCARE_CHAT_OUTPUT_GUARD(text)` phải trả `True` thì mới phát phản hồi model. Khi không sẵn sàng, chat trả lời dự phòng và ghi `safety_status=degraded`.
+- `MINDCARE_ALERT_DELIVERY_ENQUEUE(alert_id)`: đưa delivery vào worker. Worker gọi `deliver_queued_alert(alert_id)` với `MINDCARE_ALERT_SENDER(channel=..., recipient=..., message=...)` đã cấu hình. Worker kiểm tra lại consent và trạng thái contact ngay trước lúc gửi.
+- `MINDCARE_PASSWORD_RESET_URL` và `MINDCARE_CONTACT_INVITATION_URL`: URL frontend dùng trong email token; cấu hình SMTP Django và `DEFAULT_FROM_EMAIL` cho luồng email.
+- `MINDCARE_RAG_MANIFEST`: đường dẫn manifest JSON đã duyệt cho endpoint trạng thái index; có thể đặt `MINDCARE_RAG_EMBEDDING_MODEL` để từ chối manifest không tương thích.
+
+Rate limit mặc định dùng Django cache. Khi chạy nhiều worker, cấu hình cache dùng chung như Redis và đặt `DJANGO_SECRET_KEY` riêng, không dùng khóa mặc định dành cho môi trường phát triển.
+`client_message_id` được chống trùng trong phạm vi một session bằng transaction và khóa session; để bảo đảm exactly-once trên nhiều worker cần thêm ràng buộc/lưu idempotency bền vững. Các adapter và provider nêu trên là điều kiện để chạy đầy đủ luồng AI/RAG/email/delivery; khi chưa cấu hình, endpoint trả trạng thái lỗi hoặc fallback như mô tả, không tạo kết quả AI giả.

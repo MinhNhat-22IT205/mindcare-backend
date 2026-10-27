@@ -1,6 +1,8 @@
 import uuid
 
 from django.db import models
+from django.db.models import Q
+from django.db.models.functions import Lower
 
 
 class User(models.Model):
@@ -18,6 +20,7 @@ class User(models.Model):
 
     class Meta:
         db_table = 'users'
+        constraints = [models.UniqueConstraint(Lower('email'), name='users_email_lower_unique')]
 
 
 class UserConsent(models.Model):
@@ -31,23 +34,38 @@ class UserConsent(models.Model):
 
     class Meta:
         db_table = 'user_consents'
+        indexes = [models.Index(fields=['user', 'scope', '-recorded_at'], name='consents_user_scope_time')]
 
 
 class CheckIn(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='check_ins')
     checkin_date = models.DateField()
-    stress_level = models.IntegerField()
-    mood_level = models.IntegerField()
-    anxiety_level = models.IntegerField()
-    energy_level = models.IntegerField()
-    sleep_hours = models.FloatField()
-    note = models.TextField()
+    stress_level = models.IntegerField(null=True, blank=True)
+    mood_level = models.IntegerField(null=True, blank=True)
+    anxiety_level = models.IntegerField(null=True, blank=True)
+    energy_level = models.IntegerField(null=True, blank=True)
+    sleep_hours = models.FloatField(null=True, blank=True)
+    note = models.TextField(blank=True)
     recorded_at = models.DateTimeField()
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = 'check_ins'
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'checkin_date'], name='checkins_user_date_unique'),
+            *[
+                models.CheckConstraint(
+                    condition=Q(**{f'{field}__gte': 0, f'{field}__lte': 10}) | Q(**{f'{field}__isnull': True}),
+                    name=f'checkins_{field}_range',
+                )
+                for field in ('stress_level', 'mood_level', 'anxiety_level', 'energy_level')
+            ],
+            models.CheckConstraint(
+                condition=Q(sleep_hours__gte=0, sleep_hours__lte=24) | Q(sleep_hours__isnull=True),
+                name='checkins_sleep_hours_range',
+            ),
+        ]
 
 
 class JournalEntry(models.Model):
@@ -116,6 +134,7 @@ class ChatMessage(models.Model):
 
     class Meta:
         db_table = 'chat_messages'
+        indexes = [models.Index(fields=['session', '-created_at'], name='messages_session_time')]
 
 
 class AnalysisRun(models.Model):
@@ -136,6 +155,7 @@ class AnalysisRun(models.Model):
 
     class Meta:
         db_table = 'analysis_runs'
+        indexes = [models.Index(fields=['user', '-created_at'], name='runs_user_created')]
 
 
 class AnalysisReport(models.Model):
@@ -172,6 +192,14 @@ class AnalysisSource(models.Model):
 
     class Meta:
         db_table = 'analysis_sources'
+        constraints = [models.CheckConstraint(
+            condition=(
+                Q(check_in__isnull=False, journal__isnull=True, chat_message__isnull=True)
+                | Q(check_in__isnull=True, journal__isnull=False, chat_message__isnull=True)
+                | Q(check_in__isnull=True, journal__isnull=True, chat_message__isnull=False)
+            ),
+            name='analysis_source_exactly_one',
+        )]
 
 
 class SafetyAlert(models.Model):
@@ -196,6 +224,7 @@ class SafetyAlert(models.Model):
 
     class Meta:
         db_table = 'safety_alerts'
+        indexes = [models.Index(fields=['reviewer_user', 'status'], name='alerts_reviewer_status')]
 
 
 class AlertDelivery(models.Model):
@@ -215,6 +244,7 @@ class AlertDelivery(models.Model):
 
     class Meta:
         db_table = 'alert_deliveries'
+        indexes = [models.Index(fields=['alert', 'delivery_status'], name='deliveries_alert_status')]
 
 
 class Notification(models.Model):
