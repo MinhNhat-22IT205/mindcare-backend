@@ -1,6 +1,6 @@
 # MINDCARE — API Design Document (ERD 14 bảng)
 
-> **Phiên bản:** `2.0 – 27/10/2026`  |  **Trạng thái:** Đề xuất thiết kế để lập trình đồ án, **chưa phải API đã triển khai**  |  **Base path:** `/api/v1`
+> **Phiên bản:** `2.1 – 15/11/2026`  |  **Trạng thái:** Đề xuất thiết kế để lập trình đồ án, **chưa phải API đã triển khai**  |  **Base path:** `/api/v1`
 
 > **Nguồn làm căn cứ:** File yêu cầu hệ thống `MindCare_YeuCauTinhNang_va_YeuCauHeThong.xlsx` (112 mã SR), ERD 14 bảng đã chốt trong cuộc trao đổi, và bố cục chi tiết tham khảo từ `API_Docs(1).md`. Tài liệu này không giả định các bảng đã bị loại khỏi ERD vẫn tồn tại. Các giới hạn được đánh dấu rõ ở mục 2 và bảng truy vết cuối tài liệu.
 
@@ -11,7 +11,7 @@
 **Không phải hệ thống chẩn đoán, dự đoán tự hại đã được kiểm định lâm sàng hoặc dịch vụ phản ứng khẩn cấp 24/7.** Các ví dụ, điểm số và ngưỡng trong tài liệu chỉ là đề xuất kỹ thuật cần kiểm thử. Khi thiếu dữ liệu, API trả trạng thái giới hạn thay vì suy diễn. Với tín hiệu khẩn cấp, chatbot cung cấp hướng dẫn tiếp cận hỗ trợ phù hợp ngay, không chờ hoàn tất worker.
 
 - **Số bảng nghiệp vụ:** `14`; **số HTTP API được đặc tả chi tiết:** `67`; **số worker/luồng nội bộ:** `16`; **số yêu cầu hệ thống đối chiếu:** `112`.
-- Các API được chọn theo **nghiệp vụ cần giao tiếp FE ↔ BE**, không tách một endpoint cho mỗi bước AI. Emotion model, context builder, sufficiency checker, RAG và safety worker chạy nội bộ.
+- Các API được chọn theo **nghiệp vụ cần giao tiếp FE ↔ BE**, không tách một endpoint cho mỗi bước AI. AI Chat dùng **một model, một lần gọi suy luận cho mỗi lượt phản hồi thông thường, không fine-tuning thêm**; model chọn stage, chọn strategy và sinh phản hồi trong cùng lần gọi. Context Builder và safety chạy ở backend; emotion/analysis là nghiệp vụ riêng.
 - Các chức năng chia sẻ dữ liệu bất kỳ, support case và audit trail bền vững **chưa triển khai đầy đủ** trên đúng 14 bảng. Không tạo API giả vờ có các bảng đó.
 - Quy tắc ghi/đọc DB minh họa dưới dạng `C=Create, R=Read, U=Update, D=Delete`. Tên bảng viết hoa đúng theo ERD.
 
@@ -29,7 +29,7 @@
 1. `USER_CONSENTS` là lịch sử đồng ý/rút lại theo `scope`, **không phải** hệ thống `ACCESS_GRANTS` cho phép cấp quyền đọc bất kỳ dữ liệu nào. Đồ án chỉ hỗ trợ phạm vi chia sẻ cảnh báo tối thiểu theo contact.
 2. Không có bảng sessions/token blacklist. JWT stateless thời hạn ngắn; `/auth/logout` chỉ xóa token phía client, không thu hồi ngay server-side. Nếu cần revoke theo thiết bị cần thêm persistent session store.
 3. Không có `SUPPORT_CASES`, `CASE_NOTES`, `ALERT_POLICIES`, `AUDIT_LOGS`, `KNOWLEDGE_DOCUMENTS`, `KNOWLEDGE_CHUNKS`, `EXTRACTED_FACTS`, `AI_MODELS` hoặc `DATA_RIGHTS_REQUESTS`. Không đề xuất CRUD DB vào các bảng này.
-4. Tài liệu RAG và embedding index lưu bằng **file/repository/object storage có version**, được review qua quy trình quản trị độc lập; chỉ metadata citations được lưu ở `CHAT_MESSAGES.metadata`.
+4. Tài liệu RAG và embedding index thuộc **phần mở rộng tùy chọn**, lưu bằng file/repository/object storage có version và review qua quy trình độc lập. Luồng AI Chat ESConv cơ bản không phụ thuộc index, embedding model hoặc citations; thiết kế RAG cũ được giữ tại `API-067`/`JOB-10` để tham khảo mở rộng.
 5. Không có grant chia sẻ báo cáo có thể thu hồi cho người ngoài. API report preview chỉ dành cho chủ tài khoản; chia sẻ chính thức có thời hạn là backlog cần thêm schema.
 6. Khi dùng PostgreSQL, `json` trong ERD có thể chọn `jsonb`. Các trường `JOURNAL_ENTRIES.content`, `CHAT_MESSAGES.content`, `SAFETY_PLANS.personal_notes` là `text` nhưng nên lưu **ciphertext encoded** bằng application-layer encryption; response chỉ giải mã sau authorization.
 
@@ -117,7 +117,7 @@ Response lỗi:
 | `ALERT_DELIVERIES.delivery_status` | `queued -> sent \| delivered \| failed \| cancelled`; `sent` không có nghĩa người nhận đã đọc. |
 | `TRUSTED_CONTACTS.verification_status` | `pending -> verified \| declined`; đổi địa chỉ đặt lại `pending`; xóa liên hệ hủy khả năng gửi mới. |
 | `USER_CONSENTS.action` | `grant \| revoke`, mỗi sự kiện append-only; quyền hiện tại = quyết định mới nhất hợp lệ (có xét hết hạn, scope và đối tượng liên quan). |
-| `CHAT_SESSIONS.state_json` | Cờ `followup_enabled`, bộ đếm ngắn hạn và phiên bản pipeline; không lưu state khẩn cấp hay permission thay cho DB. |
+| `CHAT_SESSIONS.state_json` | Cờ `followup_enabled`, `last_stage`, `last_strategy`, bộ đếm ngắn hạn và phiên bản pipeline; không lưu state khẩn cấp hay permission thay cho DB. |
 
 ### 3.4. Idempotency, lỗi và tác vụ bất đồng bộ
 
@@ -125,6 +125,68 @@ Response lỗi:
 - Sửa/xóa nguồn cần tìm các `ANALYSIS_SOURCES` phụ thuộc, đánh dấu run `outdated` rồi mới tính lại khi consent còn hiệu lực.
 - 202 nghĩa là chấp nhận queue; client dùng `GET /me/analysis-runs/{id}` hoặc `GET /me/alerts/{id}` để theo dõi. Không mô tả “đã gửi” khi mới queued.
 - Model/provider lỗi phải trả fallback đúng ngữ cảnh, không thay thế bằng kết luận tự tạo. Safety layer không được phụ thuộc một LLM duy nhất.
+
+### 3.5. Kiến trúc AI Chat MindCare không cần fine-tuning thêm
+
+```text
+1. User Message + Conversation History
+2. Safety Check + Context Builder (backend)
+3. LLM trên Space VietCristal/mindcare-esconv
+   Input: System Prompt + ESConv Framework + Conversation Context
+   3.1. Stage Selection: Exploration / Comforting / Action
+   3.2. Strategy Selection: 7 chiến lược chính + Others
+   3.3. Response Generation: sinh phản hồi theo stage/strategy đã chọn
+   Một model · Một lần gọi suy luận · Không fine-tuning thêm
+4. Response → backend hậu kiểm/lưu → MindCare
+```
+
+**Model và phạm vi tích hợp:** Dùng model phục vụ tại [VietCristal/mindcare-esconv](https://huggingface.co/spaces/VietCristal/mindcare-esconv). MindCare điều khiển bằng system prompt, ESConv framework và ngữ cảnh hội thoại, không có bước training, cập nhật trọng số hoặc huấn luyện từ feedback. Model có thể đã được tinh chỉnh trước khi được cung cấp; “không fine-tuning” nghĩa là dự án không cần huấn luyện thêm.
+
+**Đối chiếu Space ngày 15/11/2026:** [Mã nguồn `app.py`](https://huggingface.co/spaces/VietCristal/mindcare-esconv/blob/main/app.py) tại revision `e27b8d940b15e7afda5eeb1cf8719eb22a83e38c` nạp `meta-llama/Llama-3.1-8B-Instruct` cùng adapter `navidmadani/esconv_sra_llama3_8b`. Hàm Gradio `/generate` hiện nhận `message` và `strategy`, trả text; strategy chọn sẵn từ 5 lựa chọn POC (gồm `No Strategy`), chưa nhận history, chưa tự chọn stage và chưa trả JSON stage/strategy. Hợp đồng bên dưới cần **triển khai bản cập nhật Space** trước khi gọi thật. Backend đã có adapter `mindcare.integrations.esconv.respond`; mã Space mới tại `deploy/huggingface_space/`, đóng gói bằng `python manage.py prepare_esconv_space --output <thư_mục_trống>`. Endpoint mới `/generate_chat` nhận một chuỗi JSON `{messages, prompt_version}` và trả một chuỗi JSON `{stage, strategy, response}`. Backend POST `/gradio_api/call/generate_chat` một lần, sau đó GET event stream để nhận cùng kết quả; không thêm lượt gọi để phân loại. URL trang Space không phải REST chat endpoint.
+
+**Stages:** Mỗi phản hồi thông thường có đúng một stage. Model đánh giá lại theo tin nhắn và lịch sử, có thể chuyển lại stage trước khi hoàn cảnh thay đổi; không ép mọi cuộc hội thoại đi đủ ba stage theo số lượt cố định.
+
+| Giá trị `stage` | Stage | Mục tiêu |
+|---|---|---|
+| `exploration` | Exploration | Hiểu tình huống, nhu cầu và điều người dùng đang gặp phải. |
+| `comforting` | Comforting | Công nhận cảm xúc, thể hiện sự thấu hiểu và đồng cảm. |
+| `action` | Action | Giúp người dùng khám phá những hành động có thể thực hiện khi họ sẵn sàng. |
+
+**Strategies:** Theo [ESConv](https://github.com/thu-coai/Emotional-Support-Conversation), có **7 chiến lược hỗ trợ chính và nhóm Others**, tổng cộng **8 giá trị** trong API. Mỗi phản hồi chọn một strategy chính; các nhóm phù hợp stage là hướng dẫn trong prompt, không phải ràng buộc một-một.
+
+| Giá trị `strategy` | Tên ESConv | Cách sử dụng trong MindCare |
+|---|---|---|
+| `questions` | Questions | Hỏi nhẹ nhàng để hiểu thêm; tôn trọng tùy chọn hỏi bổ sung. |
+| `restatement_or_paraphrasing` | Restatement or Paraphrasing | Diễn đạt lại điều người dùng chia sẻ để kiểm tra sự hiểu đúng. |
+| `reflection_of_feelings` | Reflection of Feelings | Phản chiếu cảm xúc được thể hiện trong hội thoại. |
+| `self_disclosure` | Self-disclosure | Chia sẻ góc nhìn hỗ trợ có giới hạn; AI không bịa trải nghiệm cá nhân. |
+| `affirmation_and_reassurance` | Affirmation and Reassurance | Ghi nhận nỗ lực, trấn an có căn cứ. |
+| `providing_suggestions` | Providing Suggestions | Đưa ra lựa chọn, để người dùng tự quyết định. |
+| `information` | Information | Cung cấp thông tin liên quan có căn cứ. |
+| `others` | Others | Lời chào, kết nối hoặc phản hồi không thuộc bảy nhóm trên. |
+
+**Safety Check + Context Builder:**
+
+1. Backend kiểm tra ownership, nội dung và safety bằng quy tắc/policy độc lập với lượt suy luận. Nhánh khẩn cấp dùng phản hồi mẫu đã duyệt và quy trình alert hiện có, không chờ model.
+2. Dựng history từ `CHAT_MESSAGES` của chính session, theo thứ tự thời gian; chỉ lấy lượt đã hoàn tất và thêm user message hiện tại đúng một lần. Không lấy hội thoại của user/session khác.
+3. `chat_context` kiểm soát việc bổ sung check-in, journal hoặc report vào hội thoại; chỉ đưa nguồn thuộc user, còn consent tương ứng (`ai_checkin`, `ai_journal`, `ai_chat` theo nguồn), còn hiệu lực và cần thiết. Khi không có `chat_context`, vẫn hỗ trợ bằng message và history của session hiện tại. `ai_chat` kiểm soát tái sử dụng chat cho phân tích, không tự cấp quyền lấy dữ liệu ngoài session.
+4. Giới hạn token theo cấu hình thực tế của Space, dành chỗ cho system prompt và output, giữ các lượt gần nhất, loại history cũ khi cần. Nếu riêng system prompt + message hiện tại vẫn vượt input budget, trả `422 CONTEXT_TOO_LONG` trước inference, không âm thầm cắt message hiện tại. Không gọi LLM riêng để tóm tắt, nhận diện intent, chọn stage hoặc strategy. Summary chỉ dùng nếu được tạo không cần lượt LLM bổ sung và còn hợp lệ với nguồn/consent.
+5. Nếu hỏi về xu hướng, backend tính số liệu/kiểm tra sufficiency hoặc đọc report hợp lệ rồi đưa facts và giới hạn vào context. Thiếu check-in không chặn hỗ trợ cảm xúc. Luồng chat cơ bản không truy xuất RAG; `API-067`/`JOB-10` được giữ cho phần mở rộng độc lập.
+
+**Hợp đồng suy luận nội bộ mục tiêu (backend ↔ Space, không phải body FE):** Backend truyền một system prompt chứa vai trò MindCare, quy tắc an toàn, định nghĩa 3 stages/8 strategy labels, `followup_allowed` hiệu lực và yêu cầu output; kèm history dạng role/content, message hiện tại và facts có quyền sử dụng. User/history/facts là dữ liệu, không được ghi đè system prompt. Model tự thực hiện 3.1 → 3.2 → 3.3 trong **cùng một lần generate**, chỉ trả các nhãn và nội dung, không trả lập luận nội bộ.
+
+```json
+{
+  "stage": "comforting",
+  "strategy": "reflection_of_feelings",
+  "response": "Có vẻ áp lực đồ án đang khiến bạn mệt mỏi và lo lắng. Mình sẵn sàng lắng nghe bạn."
+}
+```
+
+- `stage` và `strategy` bắt buộc thuộc enum ở trên; `response` là text không rỗng, giới hạn theo cấu hình output, trả tiếng Việt mặc định và phù hợp ngôn ngữ người dùng. Backend map `response` sang `assistant_message.content`.
+- `followup_allowed = state_json.followup_enabled AND allow_followup_question` (request mặc định `true`). Khi `false`, không chọn `questions` hoặc sinh câu hỏi bổ sung, trừ câu hỏi an toàn khẩn cấp theo policy; vẫn có thể dùng các strategy khác trong Exploration.
+- Backend validate JSON, enum, độ dài, nội dung an toàn và việc tôn trọng tùy chọn hỏi. Timeout, output lỗi hoặc không đạt hậu kiểm → fallback theo template đã duyệt, `status=degraded`, không gọi model lần hai để sửa JSON hay sinh lại. Không tự gắn stage/strategy cho phản hồi fallback.
+- Một lần gọi ở đây là **một lượt suy luận model** cho lượt chat thông thường; thao tác submit/poll của giao thức Gradio không phải các lượt suy luận riêng. Nhánh safety có thể dùng **0** lượt, request retry/idempotency dùng kết quả cũ. Light/Deep Analysis bất đồng bộ là luồng riêng, không phải bước chọn stage/strategy của chat.
 
 ## 4. Mapping 14 bảng DB
 
@@ -135,7 +197,7 @@ Response lỗi:
 | `CHECK_INS` | Chỉ số do user tự báo cáo | `id, user_id, checkin_date, stress_level, mood_level, anxiety_level, energy_level` |
 | `JOURNAL_ENTRIES` | Nhật ký tự do của chủ user | `id, user_id, content, experienced_at, created_at, updated_at` |
 | `CHAT_SESSIONS` | Phiên và trạng thái ngắn hạn chatbot | `id, user_id, title, summary, state_json, created_at, updated_at` |
-| `CHAT_MESSAGES` | Tin nhắn và metadata điều phối/RAG/feedback | `id, session_id, reply_to_message_id, role, message_type, content, metadata` |
+| `CHAT_MESSAGES` | Tin nhắn và metadata ESConv/safety/feedback | `id, session_id, reply_to_message_id, role, message_type, content, metadata` |
 | `ANALYSIS_RUNS` | Một lượt AI Analysis, trạng thái, provenance và chất lượng | `id, user_id, analysis_type, trigger_source, status, period_start, period_end` |
 | `ANALYSIS_REPORTS` | Kết quả AI gộp JSON (mỗi run tối đa 1) | `id, analysis_run_id, emotion_summary, trend_metrics, concern_level, summary, contributing_factors` |
 | `ANALYSIS_SOURCES` | Tham chiếu nguồn đầu vào analysis | `id, analysis_run_id, check_in_id, journal_id, chat_message_id` |
@@ -219,7 +281,7 @@ Response lỗi:
 | `API-032` | **GET** | `/me/concern-history` | Xem tín hiệu cần chú ý đã ghi nhận | User | SR-044, SR-045, SR-046 |
 | `API-033` | **GET** | `/me/reports/preview` | Xem bản tóm tắt để tự tải/chia sẻ thủ công | User | SR-110, SR-111 |
 
-### G. Chatbot với Context Builder / Router / RAG — 9 API
+### G. AI Chat với Safety Check / Context Builder / ESConv — 9 API
 
 | ID | Method | Endpoint (`/api/v1` + path) | Mô tả | Permission | Truy vết SR |
 |---|---|---|---|---|---|
@@ -229,7 +291,7 @@ Response lỗi:
 | `API-037` | **PATCH** | `/me/chat/sessions/{session_id}` | Đổi tên phiên / bật tắt câu hỏi bổ sung | User | SR-053, SR-061 |
 | `API-038` | **DELETE** | `/me/chat/sessions/{session_id}` | Xóa lịch sử một phiên chat | User | SR-053, SR-012 |
 | `API-039` | **GET** | `/me/chat/sessions/{session_id}/messages` | Danh sách tin nhắn hội thoại | User | SR-050, SR-052 |
-| `API-040` | **POST** | `/me/chat/sessions/{session_id}/messages` | Gửi tin nhắn và sinh phản hồi có điều phối | User | SR-050, SR-051, SR-054, SR-055, SR-056, SR-057, SR-058, SR-059, SR-060, SR-061, SR-062, SR-063, SR-064, SR-065, SR-072, SR-073, SR-074, SR-075, SR-076, SR-077 |
+| `API-040` | **POST** | `/me/chat/sessions/{session_id}/messages` | Gửi tin nhắn, chọn stage/strategy ESConv và sinh phản hồi trong một lượt suy luận | User | SR-050, SR-051, SR-054, SR-055, SR-056, SR-057, SR-058, SR-059, SR-060, SR-061, SR-065, SR-072, SR-073, SR-074, SR-075, SR-076, SR-077 |
 | `API-041` | **PATCH** | `/me/chat/messages/{message_id}/feedback` | Lưu phản hồi tự nguyện cho một phản hồi AI | User | SR-066, SR-067, SR-068 |
 | `API-042` | **POST** | `/me/chat/messages/{message_id}/confirm-checkin` | Xác nhận dữ kiện check-in gợi ra từ chat | User | SR-042, SR-043, SR-069, SR-070, SR-071 |
 
@@ -271,7 +333,7 @@ Response lỗi:
 | `API-064` | **GET** | `/admin/analysis-runs` | Dashboard vận hành job AI (không đọc dữ liệu riêng) | Admin | SR-036, SR-037, SR-102 |
 | `API-065` | **GET** | `/admin/alerts` | Danh sách alert chờ phân công (metadata tối thiểu) | Admin | SR-087, SR-088, SR-105 |
 | `API-066` | **POST** | `/admin/alerts/{alert_id}/assign` | Gán người hỗ trợ phụ trách một alert | Admin | SR-088, SR-103, SR-105 |
-| `API-067` | **GET** | `/admin/rag-index/status` | Kiểm tra trạng thái index RAG đã duyệt | Admin | SR-062, SR-063, SR-098, SR-099, SR-100 |
+| `API-067` | **GET** | `/admin/rag-index/status` | Kiểm tra trạng thái index RAG đã duyệt (mở rộng tùy chọn, ngoài AI Chat cơ bản) | Admin | SR-062, SR-063, SR-098, SR-099, SR-100 |
 
 ## 6. Đặc tả API chi tiết
 
@@ -2253,7 +2315,7 @@ Query: from=YYYY-MM-DD; to=YYYY-MM-DD; include=stress,mood,sleep (allowlist)
 **Ghi chú triển khai / giới hạn:**
 - SR-112 share/revoke/download dưới quyền bên thứ ba chưa hỗ trợ đầy đủ; cần bảng share grant hoặc dịch vụ cấp quyền với TTL mới có thể làm đúng.
 
-### G. Chatbot với Context Builder / Router / RAG
+### G. AI Chat với Safety Check / Context Builder / ESConv
 
 #### API-034 — Tạo phiên trò chuyện mới
 
@@ -2281,7 +2343,7 @@ Query: from=YYYY-MM-DD; to=YYYY-MM-DD; include=stress,mood,sleep (allowlist)
 **Backend xử lý theo thứ tự:**
 
 1. Xác thực người dùng; title tùy chọn, tối đa 120 ký tự và không tự gợi ý chẩn đoán.
-2. INSERT CHAT_SESSIONS với user_id token, summary rỗng/null, state_json tối thiểu {pipeline_version, followup_enabled:true}.
+2. INSERT CHAT_SESSIONS với user_id token, summary rỗng/null, state_json tối thiểu {pipeline_version:mindcare-esconv-v1, followup_enabled:true, last_stage:null, last_strategy:null}.
 3. Đặt created_at=updated_at theo server time và trả session_id.
 4. Không tự tạo CHAT_MESSAGES hoặc gọi LLM chỉ vì mở session.
 
@@ -2559,7 +2621,7 @@ Path: session_id=UUID; Query: cursor,limit=30 (max 100)
 
 1. Xác minh session thuộc user, nếu không trả 404.
 2. SELECT CHAT_MESSAGES WHERE session_id=session_id ORDER BY created_at DESC,id DESC theo cursor; mỗi page đảo sang ASC khi render.
-3. Giải mã message.content sau khi đã kiểm tra quyền; lọc metadata chỉ giữ intent/action/rag_used/citations an toàn.
+3. Giải mã message.content sau khi đã kiểm tra quyền; metadata trả về chỉ giữ stage/strategy/status và feedback an toàn của phản hồi ESConv. Với lịch sử pipeline cũ, chỉ trả các trường cũ đã được whitelist, không tự suy diễn stage/strategy từ intent/action.
 4. Không trả dữ liệu nội bộ như prompt nguyên văn, embedding, safety model log và token provider.
 5. Trả next_cursor; Cache-Control:no-store.
 
@@ -2593,21 +2655,22 @@ Path: session_id=UUID; Query: cursor,limit=30 (max 100)
 
 **Các lỗi nghiệp vụ chính:** `404 SESSION_NOT_FOUND`, `422 INVALID_CURSOR`
 
-#### API-040 — Gửi tin nhắn và sinh phản hồi có điều phối
+#### API-040 — Gửi tin nhắn và sinh phản hồi theo ESConv
 
 **Endpoint:** `POST /api/v1/me/chat/sessions/{session_id}/messages`  
 **Permission:** `User`  
-**Yêu cầu nguồn:** `SR-050`, `SR-051`, `SR-054`, `SR-055`, `SR-056`, `SR-057`, `SR-058`, `SR-059`, `SR-060`, `SR-061`, `SR-062`, `SR-063`, `SR-064`, `SR-065`, `SR-072`, `SR-073`, `SR-074`, `SR-075`, `SR-076`, `SR-077`  
+**Yêu cầu nguồn:** `SR-050`, `SR-051`, `SR-054`, `SR-055`, `SR-056`, `SR-057`, `SR-058`, `SR-059`, `SR-060`, `SR-061`, `SR-065`, `SR-072`, `SR-073`, `SR-074`, `SR-075`, `SR-076`, `SR-077`
+
 **Phạm vi:** `MVP`
 
-**Use case / Mục đích:** Endpoint trọng tâm: Safety precheck -> Intent -> Context Builder -> Sufficiency -> Action Router -> RAG -> LLM -> Safety postcheck -> lưu trả.
+**Use case / Mục đích:** User Message + Conversation History → Safety Check + Context Builder → một lần gọi model ESConv (Stage Selection → Strategy Selection → Response Generation) → hậu kiểm/lưu → Response về MindCare. Định nghĩa stages/strategies và hợp đồng model tại mục 3.5.
 
 **CRUD / bảng dữ liệu hoặc tích hợp:**
 
 | Bảng / dịch vụ | Thao tác |
 |---|---|
 | `CHAT_SESSIONS` | R/U |
-| `CHAT_MESSAGES` | C |
+| `CHAT_MESSAGES` | R/C |
 | `USER_CONSENTS` | R |
 | `CHECK_INS` | R |
 | `JOURNAL_ENTRIES` | R |
@@ -2615,6 +2678,7 @@ Path: session_id=UUID; Query: cursor,limit=30 (max 100)
 | `ANALYSIS_REPORTS` | R |
 | `ANALYSIS_SOURCES` | C (worker) |
 | `SAFETY_ALERTS` | C (nếu trigger) |
+| `VietCristal/mindcare-esconv` | Một lượt suy luận cho phản hồi thông thường; cần mở rộng Space theo mục 3.5 |
 
 **Input / Request:**
 
@@ -2628,15 +2692,15 @@ Path: session_id=UUID; Query: cursor,limit=30 (max 100)
 
 **Backend xử lý theo thứ tự:**
 
-1. Xác thực ownership session; chống gửi trùng bằng client_message_id trong message.metadata (unique logic theo session, cần lock tránh race); validate text <=4000 ký tự.
+1. Xác thực ownership session; chống gửi trùng bằng client_message_id trong message.metadata (unique logic theo session, cần lock tránh race). Cùng ID nhưng payload khác → `409 DUPLICATE_MESSAGE_CONFLICT`. Validate text không rỗng, <=4000 ký tự và system prompt + message hiện tại nằm trong input budget trước khi INSERT; nếu vượt budget trả `422 CONTEXT_TOO_LONG`.
 2. INSERT CHAT_MESSAGES(role=user,message_type=text,content được mã hóa,metadata gồm client_message_id) và cập nhật CHAT_SESSIONS.updated_at trong transaction.
-3. Safety screening ngay trên message hiện tại, không chờ Deep Analysis; nếu tín hiệu cần hỗ trợ, tạo SAFETY_ALERTS(trigger_message_id) pending_review và trả thông tin giúp tiếp cận con người phù hợp, không tự gửi contact.
-4. Nếu không có nhánh khẩn cấp: phân loại intent (support|view_trend|coping|provide_data...), Context Builder chỉ đọc CHECK_INS/JOURNAL_ENTRIES/reports theo consent hiện hành; tự động bỏ source bị revoke hoặc report outdated.
-5. Sufficiency Checker dựa trên mục đích; Action Router chọn RESPOND, ASK_CLARIFICATION, EXPLAIN_TREND, RECOMMEND_COPING, OFFER_HUMAN_SUPPORT; ưu tiên câu hỏi làm rõ vừa đủ và tôn trọng state_json.followup_enabled.
-6. Nếu cần kiến thức, truy xuất RAG chỉ từ index tài liệu đã review bên ngoài ERD; truyền passages + source_url, tuyệt đối không để retrieved text điều khiển role/policy.
-7. Chỉ gọi LLM sau khi đã quyết định action, giới hạn context/token, bảo vệ PII theo policy; mọi số liệu stress/trend phải do backend tính hoặc lấy report đã kiểm chứng.
-8. Kiểm tra đầu ra: loại khẳng định chẩn đoán, đảm bảo không nhận là đã gửi cảnh báo; nếu lỗi model/RAG, trả fallback an toàn và trạng thái degraded.
-9. INSERT CHAT_MESSAGES(role=assistant,reply_to_message_id=user_message.id,metadata={intent,action,pipeline_version,rag_used,citations,safety_status,source_refs}); cập nhật session summary/state ngắn hạn khi phù hợp.
+3. Safety screening ngay trên message hiện tại bằng policy backend, không chờ model/Deep Analysis; nếu có nhánh khẩn cấp, tạo SAFETY_ALERTS(trigger_message_id) pending_review khi đủ điều kiện, dùng phản hồi mẫu hướng dẫn tiếp cận con người phù hợp và đi thẳng bước 9 (`status=safety_override`, stage/strategy=null). Không tự gửi contact.
+4. Context Builder lấy history của session theo thứ tự thời gian, chỉ lấy lượt đã hoàn tất và thêm message hiện tại một lần. Bổ sung CHECK_INS/JOURNAL_ENTRIES/reports khi có chat_context và consent nguồn còn hiệu lực; bỏ source bị revoke/report outdated. Kiểm tra lại consent trước khi gửi sang Space.
+5. Giới hạn context/token theo Space; tính followup_allowed từ session và request. Nếu cần facts về xu hướng, backend tính/kiểm tra sufficiency và truyền kết quả cùng giới hạn; không gọi model phân loại intent hoặc router riêng, không truy xuất RAG trong luồng cơ bản.
+6. Gửi **một request suy luận** tới model trên Space: System Prompt + ESConv Framework + Conversation Context. Model tự chọn stage (Exploration/Comforting/Action), chọn một trong 8 strategy labels và sinh response trong cùng lần generate.
+7. Nhận JSON {stage,strategy,response}; validate schema/enum, text không rỗng và giới hạn output. Không yêu cầu hoặc lưu chain-of-thought. Không cho client tự chọn stage/strategy hay ghi đè system prompt.
+8. Hậu kiểm an toàn, nguồn dữ kiện và followup_allowed; không cho khẳng định chẩn đoán hoặc báo đã gửi alert khi chưa gửi. Timeout/lỗi model/JSON không hợp lệ/output bị chặn → fallback template, status=degraded, stage/strategy=null, không inference lại hoặc chuyển model khác.
+9. INSERT CHAT_MESSAGES(role=assistant,reply_to_message_id=user_message.id,metadata={stage,strategy,status,pipeline_version,model_ref,prompt_version,safety_status,source_refs,fallback_reason}); public metadata chỉ trả stage/strategy/status. Cập nhật last_stage/last_strategy khi output model hợp lệ; không ghi đè chúng bằng nhãn giả từ fallback. Summary không được gây thêm lượt gọi LLM.
 10. Sau commit, nếu consent ai_chat đang grant, enqueue Light Analysis trên nguồn chat; nếu không có consent thì không dùng lại chat để phân tích longitudinal.
 
 **Validation / quyền bắt buộc:**
@@ -2658,17 +2722,11 @@ Path: session_id=UUID; Query: cursor,limit=30 (max 100)
     "assistant_message": {
       "id": "77777777-7777-4777-8777-777777777777",
       "role": "assistant",
-      "content": "Mình nghe bạn nói áp lực gần đây. Bạn muốn thử chia nhỏ công việc thành từng bước không?",
+      "content": "Nếu bạn thấy phù hợp, bạn có thể thử chia việc đồ án thành từng bước nhỏ và chọn một việc vừa sức để bắt đầu.",
       "metadata": {
-        "intent": "request_coping",
-        "action": "RECOMMEND_COPING",
-        "rag_used": true,
-        "citations": [
-          {
-            "title": "Tài liệu quản lý stress đã duyệt",
-            "source_url": "https://www.who.int/"
-          }
-        ]
+        "stage": "action",
+        "strategy": "providing_suggestions",
+        "status": "ok"
       }
     },
     "analysis_queued": true
@@ -2679,11 +2737,18 @@ Path: session_id=UUID; Query: cursor,limit=30 (max 100)
 }
 ```
 
-**Các lỗi nghiệp vụ chính:** `404 SESSION_NOT_FOUND`, `409 DUPLICATE_MESSAGE_CONFLICT`, `422 EMPTY_MESSAGE`, `429 RATE_LIMITED`, `503 MODEL_UNAVAILABLE`
+**Các lỗi nghiệp vụ chính:** `404 SESSION_NOT_FOUND`, `409 DUPLICATE_MESSAGE_CONFLICT`, `409 MESSAGE_IN_PROGRESS`, `422 EMPTY_MESSAGE`, `422 CONTEXT_TOO_LONG`, `429 RATE_LIMITED`, `503 MODEL_UNAVAILABLE`
 
 **Ghi chú triển khai / giới hạn:**
 - Không phát hiện tín hiệu khẩn cấp != đã đánh giá người dùng an toàn. Không cho LLM trực tiếp gửi alert.
 - Nếu timeout sau khi đã INSERT user_message thì retry phải tìm theo client_message_id và trả kết quả đã lưu (nếu có) thay vì tạo bản sao.
+- `message` là text không rỗng, tối đa 4000 ký tự; `allow_followup_question` là boolean, mặc định true; `client_message_id` bắt buộc để nhận diện cùng lượt gửi trong session. Không nhận history, stage, strategy, provider hoặc system prompt từ FE.
+- `status` thuộc `ok|degraded|safety_override`; `stage`/`strategy` bắt buộc hợp lệ khi `ok`, bằng null khi fallback/safety. Nhãn là quyết định hỗ trợ hội thoại, không phải chẩn đoán cảm xúc hoặc mức độ nguy hiểm.
+- Trả `201` khi đã lưu được cả user message và phản hồi (kể cả fallback). `503 MODEL_UNAVAILABLE` chỉ dùng khi không thể hoàn tất phản hồi/fallback đã lưu; không vừa báo lỗi vừa tuyên bố có assistant message thành công.
+- Retry khi lượt gốc đang xử lý không được gọi inference song song; dùng lock theo session/client_message_id và trả `409 MESSAGE_IN_PROGRESS`. Client retry sau đó nhận cùng cặp message đã lưu. Không tuyên bố exactly-once qua sự cố worker khi chưa có cơ chế phục hồi bền vững.
+- Metadata lịch sử và API-040 dùng cùng public schema stage/strategy/status. Pipeline ESConv không sinh intent/action/rag_used/citations; các message cũ được phân biệt bằng pipeline_version.
+- Backend hiện dùng `MINDCARE_CHAT_ANALYSIS_ENQUEUE(message_id)` để enqueue Light Analysis sau commit và chỉ khi `ai_chat` còn hiệu lực. Khi chưa cấu hình worker/callback hoặc enqueue thất bại, trả `analysis_queued=false`; worker gọi `process_chat_light_analysis` và kiểm tra lại consent. Không mô tả đã enqueue khi chưa có adapter.
+- Ngân sách input mặc định `8192` token, output Space `512` token và response tối đa `4000` ký tự; cấu hình backend/Space phải tương thích. Backend dùng giới hạn bảo thủ theo byte UTF-8, Space kiểm tra tokenizer thực tế; cắt history theo cặp lượt đã hoàn tất, giữ message hiện tại.
 
 **Audit và side effects:** Ghi sự kiện kỹ thuật tối thiểu (actor ID, action, resource ID, result, request ID) vào log vận hành bảo vệ nếu được cấu hình; **không** ghi nội dung journal/chat, token, số điện thoại, prompt hoặc thông tin cá nhân nhạy cảm. Vì ERD không có `AUDIT_LOGS`, đây không phải audit trail bền vững trong PostgreSQL.
 
@@ -2716,7 +2781,7 @@ Path: session_id=UUID; Query: cursor,limit=30 (max 100)
 
 1. Query CHAT_MESSAGES theo id, join CHAT_SESSIONS.user_id=current_user; chỉ role=assistant mới hợp lệ.
 2. Validate helpful boolean/null và recommendation_status thuộc saved|tried|skipped|none; không nhận full metadata.
-3. Merge vào metadata.feedback với user_feedback_at; không sửa content, role hoặc intent/action đã ghi.
+3. Merge vào metadata.feedback với user_feedback_at; không sửa content, role hoặc stage/strategy/status đã ghi.
 4. Trả trạng thái đã lưu; không đưa feedback vào huấn luyện nếu không có mục đích consent riêng.
 
 **Validation / quyền bắt buộc:**
@@ -4220,9 +4285,9 @@ Query: assigned=false; status=pending_review; page; limit
 **Endpoint:** `GET /api/v1/admin/rag-index/status`  
 **Permission:** `Admin`  
 **Yêu cầu nguồn:** `SR-062`, `SR-063`, `SR-098`, `SR-099`, `SR-100`  
-**Phạm vi:** `MVP`
+**Phạm vi:** `Mở rộng tùy chọn — ngoài luồng AI Chat ESConv cơ bản`
 
-**Use case / Mục đích:** Đọc manifest của knowledge index nằm ngoài 14 bảng, không sửa dữ liệu kinh nghiệm người dùng.
+**Use case / Mục đích:** Đọc manifest của knowledge index nằm ngoài 14 bảng nếu triển khai phần mở rộng RAG. Endpoint này không được gọi trong luồng AI Chat cơ bản và index chưa sẵn sàng không làm hỏng chat.
 
 **CRUD / bảng dữ liệu hoặc tích hợp:**
 
@@ -4326,7 +4391,7 @@ Các luồng sau là xử lý của backend/worker; chúng giải quyết yêu c
 
 **DB / lưu trữ:** CHECK_INS:R; ANALYSIS_RUNS:U; CHAT_MESSAGES:C (nếu hỏi)
 
-1. Xác định mục đích: trend-7d, trend-30d, baseline hoặc contextual reply; mỗi mục đích có quy tắc coverage riêng.
+1. Xác định mục đích: trend-7d, trend-30d hoặc baseline; mỗi mục đích có quy tắc coverage riêng. Trong chat, checker chỉ chuẩn bị facts/giới hạn trong Context Builder khi có yêu cầu về số liệu, không chọn stage/strategy hoặc chặn hỗ trợ cảm xúc.
 2. Đếm ngày hợp lệ, độ mới, số metric khác NULL, consent nguồn; không coi “không ghi” là 0.
 3. Trả sufficient|insufficient|limited và missing_fields/reason_code; lưu vào RUNS nếu có run.
 4. Nếu chatbot đang chạy và followup_enabled=false thì trả phản hồi giới hạn thay vì ép user check-in.
@@ -4380,22 +4445,22 @@ Các luồng sau là xử lý của backend/worker; chúng giải quyết yêu c
 
 **Kết quả:** ANALYSIS_REPORTS phi chẩn đoán kèm nguồn/giới hạn và status run.
 
-### JOB-08 • Chatbot Orchestration
+### JOB-08 • AI Chat ESConv — một model, một lượt suy luận
 
-**Yêu cầu liên quan:** `SR-051`, `SR-054`, `SR-055`, `SR-056`, `SR-057`, `SR-058`, `SR-059`, `SR-060`, `SR-061`, `SR-062`, `SR-063`, `SR-064`, `SR-065`, `SR-066`, `SR-072`, `SR-074`, `SR-076`, `SR-077`
+**Yêu cầu liên quan:** `SR-051`, `SR-054`, `SR-055`, `SR-056`, `SR-057`, `SR-058`, `SR-059`, `SR-060`, `SR-061`, `SR-065`, `SR-066`, `SR-072`, `SR-074`, `SR-076`, `SR-077`
 
 **Kích hoạt:** POST /me/chat/sessions/{session_id}/messages
 
-**DB / lưu trữ:** CHAT_MESSAGES:C; CHAT_SESSIONS:R/U; CHECK_INS:R; ANALYSIS_RUNS:R; ANALYSIS_REPORTS:R; USER_CONSENTS:R; SAFETY_ALERTS:C (if needed)
+**DB / lưu trữ:** CHAT_MESSAGES:R/C; CHAT_SESSIONS:R/U; CHECK_INS:R; JOURNAL_ENTRIES:R; ANALYSIS_RUNS:R; ANALYSIS_REPORTS:R; USER_CONSENTS:R; SAFETY_ALERTS:C (if needed)
 
-1. Safety screening câu hiện tại trước khi lấy context; ưu tiên hỗ trợ khẩn cấp khi có tín hiệu hoặc user yêu cầu.
-2. Intent recognition và context builder chỉ query dữ liệu thuộc user + có consent; báo cáo outdated bị loại.
-3. Sufficiency đánh giá theo intent; Router chọn RESPOND, ASK_CLARIFICATION, EXPLAIN_TREND, RECOMMEND_COPING, OFFER_HUMAN_SUPPORT.
-4. Nếu dùng RAG thì tìm passages từ index tài liệu đã review (ngoài DB 14), truyền source_url + version.
-5. LLM tạo draft theo action; output validator kiểm tra những khẳng định vượt nguồn và thông báo sai về alert.
-6. Lưu user+assistant messages; metadata chỉ giữ intent/action/rag_used/citations/pipeline_version không chứa private chain-of-thought hoặc raw prompt.
+1. Safety Check câu hiện tại bằng policy backend; ưu tiên phản hồi mẫu đã duyệt khi có nhánh khẩn cấp, không gọi LLM và không tự gửi contact.
+2. Context Builder dựng message + history đúng session; thêm dữ liệu cá nhân khi có consent theo mục 3.5, loại báo cáo outdated và nguồn đã thu hồi. Cắt history theo token budget, không gọi LLM để tóm tắt.
+3. Tạo System Prompt + ESConv Framework + Conversation Context, kèm followup_allowed và facts/giới hạn đã kiểm tra. Không chạy Intent Router hoặc RAG trong luồng cơ bản.
+4. Gọi model trên `VietCristal/mindcare-esconv` **một lần**: model tự chọn stage → strategy → sinh response, trả JSON theo mục 3.5; không tách ba API hoặc ba lượt suy luận.
+5. Validate JSON/enum và hậu kiểm an toàn. Nếu lỗi, dùng template fallback (`status=degraded`, stage/strategy=null); không retry model để sửa output. Nhánh safety dùng `status=safety_override`.
+6. Lưu message và metadata ESConv có whitelist, cập nhật last_stage/last_strategy từ output hợp lệ; không lưu raw prompt/private chain-of-thought. Trả content + stage/strategy/status; Light Analysis có consent được enqueue riêng sau commit theo API-040.
 
-**Kết quả:** Phản hồi phù hợp + metadata có thể test được.
+**Kết quả:** Phản hồi phù hợp + metadata stage/strategy/status có thể kiểm thử; không có bước fine-tuning trong pipeline. Đây là xử lý nội bộ của API-040, không phải một job gọi model bổ sung sau API-040.
 
 ### JOB-09 • Trích xuất & xác nhận fact tùy chọn
 
@@ -4405,7 +4470,7 @@ Các luồng sau là xử lý của backend/worker; chúng giải quyết yêu c
 
 **DB / lưu trữ:** CHAT_MESSAGES:R/U; CHECK_INS:C/U
 
-1. Tạo proposal trong CHAT_MESSAGES.metadata.extracted_checkin_proposal kèm source_message_id.
+1. Tạo proposal trong CHAT_MESSAGES.metadata.extracted_checkin_proposal kèm source_message_id bằng parser/quy tắc cho giá trị định lượng người dùng nói rõ. Không gọi thêm LLM trong luồng chat; trường hợp mơ hồ thì không tạo proposal.
 2. Không tự ghi CHECK_INS từ phỏng đoán AI.
 3. Khi người dùng gọi confirm-checkin: so sánh thang đo, ngày và conflict với check-in tự khai báo.
 4. Chỉ lưu giá trị được user xác nhận vào CHECK_INS; lưu proposal_status trong metadata; chống xác nhận lại.
@@ -4413,6 +4478,8 @@ Các luồng sau là xử lý của backend/worker; chúng giải quyết yêu c
 **Kết quả:** Check-in đã xác nhận hoặc bản ghi phản hồi từ chối, không có EXTRACTED_FACTS riêng.
 
 ### JOB-10 • RAG Index Builder
+
+**Phạm vi:** Mở rộng tùy chọn được giữ từ thiết kế 2.0; không tham gia Context Builder hoặc lượt suy luận của AI Chat ESConv cơ bản. Nếu bật retrieval trong chat về sau, cần cập nhật lại hợp đồng và bảng truy vết SR-062..064.
 
 **Yêu cầu liên quan:** `SR-062`, `SR-063`, `SR-064`, `SR-098`, `SR-099`, `SR-100`
 
@@ -4423,7 +4490,7 @@ Các luồng sau là xử lý của backend/worker; chúng giải quyết yêu c
 1. Reviewer duyệt tài liệu nguồn (tên, link, phiên bản, quyền sử dụng) qua PR/quy trình vận hành.
 2. Tách đoạn, tạo embedding và index theo embedding_model/version.
 3. Publish atomic phiên bản approved; không index tài liệu rejected và không để prompt từ RAG thay đổi chính sách hệ thống.
-4. Retriever ghi trích dẫn id/title/source_url trong CHAT_MESSAGES.metadata cho từng câu trả lời.
+4. Nếu phần mở rộng tích hợp retrieval vào một pipeline riêng, retriever ghi trích dẫn id/title/source_url cho câu trả lời có dùng nguồn. Không tự thêm citations vào metadata của pipeline `mindcare-esconv-v1`.
 
 **Kết quả:** Versioned RAG index và metadata trích dẫn; không có CRUD KNOWLEDGE_DOCUMENTS trong PostgreSQL.
 
@@ -4544,7 +4611,7 @@ sequenceDiagram
     BE-->>FE: 200 report or 409 not ready
 ```
 
-### 8.2. Chatbot — Safety → Context → Sufficiency → Router → RAG → LLM
+### 8.2. AI Chat — Message + History → Safety + Context → ESConv LLM → Response
 
 ```mermaid
 sequenceDiagram
@@ -4552,30 +4619,33 @@ sequenceDiagram
     participant BE as Django/Chat API
     participant DB as PostgreSQL
     participant SA as Safety Layer
-    participant AI as Router + Context + Sufficiency
-    participant K as RAG Index
-    participant LLM as LLM Provider
+    participant CTX as Context Builder
+    participant LLM as MindCare ESConv Space
     U->>BE: POST /me/chat/sessions/{id}/messages
     BE->>DB: Verify owner, INSERT user message
-    BE->>SA: Safety screen current message
+    BE->>SA: Safety Check theo policy backend
     alt urgent signal / request support
         SA->>DB: INSERT SAFETY_ALERTS pending_review
-        SA-->>BE: Safe response; no automatic contact
+        SA-->>BE: Template response, status=safety_override (0 inference)
     else ordinary dialog
-        BE->>AI: intent + authorized context
-        AI->>DB: Read consent, CHECK_INS, latest current REPORT
-        AI->>AI: Sufficiency Check and Action Selection
-        opt action requires knowledge
-            AI->>K: Query approved passages
-            K-->>AI: passages + source URLs
+        BE->>CTX: User Message + session history request
+        CTX->>DB: Read completed history, consent, permitted facts
+        CTX->>CTX: Token budget, followup_allowed, context limits
+        CTX-->>BE: System Prompt + ESConv Framework + Context
+        BE->>LLM: Một request suy luận
+        LLM->>LLM: Stage Selection (3 stages)
+        LLM->>LLM: Strategy Selection (7 main + Others)
+        LLM->>LLM: Response Generation
+        alt valid model result
+            LLM-->>BE: JSON stage + strategy + response
+            BE->>SA: Schema/enum + output safety validation
+            SA-->>BE: Accepted response or template fallback
+        else timeout / invalid output
+            BE->>BE: Template fallback, status=degraded, no inference retry
         end
-        AI->>LLM: Structured action + limited context
-        LLM-->>AI: Response draft
-        AI->>SA: Output safety validation
-        SA-->>BE: final or safe fallback
     end
     BE->>DB: INSERT assistant message with metadata
-    BE-->>U: reply + intent/action/citations
+    BE-->>U: content + stage/strategy/status (null labels on fallback)
 ```
 
 ### 8.3. Yêu cầu hỗ trợ → phân công → duyệt → gửi có điều kiện
@@ -4614,18 +4684,15 @@ Các cấu trúc dưới đây là **schema đề xuất để code thống nh�
 
 ```json
 {
-  "intent": "request_coping",
-  "action": "RECOMMEND_COPING",
-  "pipeline_version": "mindcare-v1",
-  "rag_used": true,
-  "citations": [
-    {
-      "title": "Doing What Matters in Times of Stress",
-      "source_url": "https://www.who.int/",
-      "document_version": "2020"
-    }
-  ],
+  "stage": "action",
+  "strategy": "providing_suggestions",
+  "status": "ok",
+  "pipeline_version": "mindcare-esconv-v1",
+  "model_ref": "VietCristal/mindcare-esconv",
+  "prompt_version": "esconv-system-v1",
   "safety_status": "checked",
+  "source_refs": [],
+  "fallback_reason": null,
   "feedback": {
     "helpful": null,
     "recommendation_status": "none"
@@ -4633,13 +4700,17 @@ Các cấu trúc dưới đây là **schema đề xuất để code thống nh�
 }
 ```
 
+Chỉ stage/strategy/status và feedback an toàn được trả cho client; model_ref/prompt_version/source_refs/safety_status/fallback_reason dùng nội bộ. Khi `status=degraded|safety_override`, stage/strategy=null; fallback_reason là mã có whitelist, không chứa raw provider error. Các trường này không được dùng làm consent hoặc bằng chứng người dùng an toàn.
+
 **`CHAT_SESSIONS.state_json`:**
 
 ```json
 {
   "followup_enabled": true,
   "chat_messages_since_last_light_analysis": 3,
-  "pipeline_version": "mindcare-v1"
+  "pipeline_version": "mindcare-esconv-v1",
+  "last_stage": "action",
+  "last_strategy": "providing_suggestions"
 }
 ```
 
@@ -4704,7 +4775,7 @@ Các cấu trúc dưới đây là **schema đề xuất để code thống nh�
 
 ## 10. Truy vết yêu cầu hệ thống → API / Job / Hạn chế
 
-Trạng thái trong bảng này mô tả **mức bao phủ của bản thiết kế**, không phải đã implement. `Có thiết kế` nghĩa có endpoint/luồng được định nghĩa; `Một phần` nghĩa chỉ hỗ trợ phạm vi thu hẹp; `Chưa hỗ trợ` nghĩa cần thay đổi schema hoặc backlog khác.
+Trạng thái trong bảng này mô tả **mức bao phủ của bản thiết kế**, không phải đã implement. `Có thiết kế` nghĩa có endpoint/luồng được định nghĩa; `Một phần` nghĩa chỉ hỗ trợ phạm vi thu hẹp; `Chưa hỗ trợ` nghĩa cần thay đổi schema hoặc backlog khác; `Hoãn khỏi AI Chat cơ bản` nghĩa yêu cầu thuộc phần mở rộng và không được tính là đã đáp ứng trong luồng ESConv mới.
 
 | SR | Chức năng (từ Excel) | Mapping API / JOB | Tình trạng trên 14 bảng |
 |---|---|---|---|
@@ -4758,20 +4829,20 @@ Trạng thái trong bảng này mô tả **mức bao phủ của bản thiết k
 | `SR-048` | Kiểm soát khẳng định và giới hạn | `API-029`, `JOB-07` | **Có thiết kế** |
 | `SR-049` | Hiển thị nguồn và khoảng quan sát | `API-024`, `API-029`, `API-030`, `JOB-07`, `JOB-13` | **Có thiết kế** |
 | `SR-050` | Nhận và trả tin nhắn hội thoại | `API-039`, `API-040` | **Có thiết kế** |
-| `SR-051` | Sinh phản hồi hỗ trợ theo hành động | `API-040`, `JOB-08` | **Có thiết kế** |
+| `SR-051` | Sinh phản hồi hỗ trợ theo hành động | `API-040`, `JOB-08` | **Có thiết kế** — Stage và strategy ESConv định hướng phản hồi trong cùng lượt suy luận. |
 | `SR-052` | Tạo và xem lại phiên hội thoại | `API-034`, `API-035`, `API-036`, `API-039` | **Có thiết kế** |
 | `SR-053` | Đặt tên và xóa phiên chat | `API-035`, `API-037`, `API-038` | **Có thiết kế** |
 | `SR-054` | Truy xuất ngữ cảnh có chọn lọc | `API-040`, `JOB-08` | **Có thiết kế** |
 | `SR-055` | Lọc context theo consent và scope | `API-040`, `JOB-08` | **Có thiết kế** |
 | `SR-056` | Rút gọn và ghi provenance | `API-040`, `JOB-08` | **Có thiết kế** |
-| `SR-057` | Nhận diện ý định hội thoại | `API-040`, `JOB-08` | **Có thiết kế** |
-| `SR-058` | Chọn hành động và tuyến xử lý | `API-040`, `JOB-08` | **Có thiết kế** |
-| `SR-059` | Lưu dấu vết điều phối chatbot | `API-040`, `JOB-08` | **Có thiết kế** |
+| `SR-057` | Nhận diện ý định hội thoại | `API-040`, `JOB-08` | **Có thiết kế** — Model hiểu nhu cầu từ context trong cùng lượt sinh; không có bộ phân loại intent riêng. |
+| `SR-058` | Chọn hành động và tuyến xử lý | `API-040`, `JOB-08` | **Có thiết kế** — Safety policy chọn nhánh khẩn cấp; hội thoại thông thường do model chọn stage/strategy, thay Action Router cũ. |
+| `SR-059` | Lưu dấu vết điều phối chatbot | `API-040`, `JOB-08` | **Có thiết kế** — Metadata stage/strategy/status và phiên bản prompt/pipeline, không lưu lập luận nội bộ. |
 | `SR-060` | Hỏi bổ sung khi thiếu thông tin | `API-040`, `JOB-04`, `JOB-08` | **Có thiết kế** |
 | `SR-061` | Tôn trọng bỏ qua/tắt câu hỏi | `API-036`, `API-037`, `API-040`, `JOB-08` | **Một phần** — Tùy chọn hỏi thêm được lưu theo session, không phải preference toàn tài khoản. |
-| `SR-062` | Truy xuất tài liệu RAG đã duyệt | `API-040`, `API-067`, `JOB-08`, `JOB-10` | **Có thiết kế** |
-| `SR-063` | Truyền passages và nguồn cho LLM | `API-040`, `API-067`, `JOB-08`, `JOB-10` | **Có thiết kế** |
-| `SR-064` | Fallback khi RAG không đủ ngữ cảnh | `API-040`, `JOB-08`, `JOB-10` | **Có thiết kế** |
+| `SR-062` | Truy xuất tài liệu RAG đã duyệt | `API-067`, `JOB-10` (mở rộng) | **Hoãn khỏi AI Chat cơ bản** — Luồng ESConv không truy xuất RAG; index tùy chọn chưa đáp ứng retrieval trong chat. |
+| `SR-063` | Truyền passages và nguồn cho LLM | `API-067`, `JOB-10` (mở rộng) | **Hoãn khỏi AI Chat cơ bản** — Không truyền passages/citations trong lượt suy luận ESConv. |
+| `SR-064` | Fallback khi RAG không đủ ngữ cảnh | `JOB-10` (mở rộng) | **Hoãn khỏi AI Chat cơ bản** — Chat xử lý thiếu context/model lỗi theo mục 3.5; không có nhánh fallback RAG. |
 | `SR-065` | Tạo gợi ý quản lý stress theo ngữ cảnh | `API-040`, `JOB-08` | **Có thiết kế** |
 | `SR-066` | Cho phép người dùng từ chối gợi ý | `API-041`, `JOB-08` | **Có thiết kế** |
 | `SR-067` | Lưu gợi ý muốn thực hiện | `API-041` | **Một phần** — Lưu trạng thái recommendation trong CHAT_MESSAGES.metadata, không quản lý danh sách công việc riêng. |
@@ -4821,7 +4892,7 @@ Trạng thái trong bảng này mô tả **mức bao phủ của bản thiết k
 | `SR-111` | Đánh dấu dữ liệu thiếu trong báo cáo | `API-033` | **Có thiết kế** |
 | `SR-112` | Xác minh quyền trước khi cấp quyền tải | — | **Chưa hỗ trợ** — Không có grant/share token bền vững cho bên thứ ba tải báo cáo và thu hồi quyền theo share_id. |
 
-**Tổng kết thiết kế:** 76 yêu cầu có thiết kế đáp ứng theo phạm vi, 29 yêu cầu chỉ đáp ứng một phần, 7 yêu cầu chưa có cơ chế tương ứng trên 14 bảng. Không đánh đồng số endpoint với số yêu cầu hệ thống.
+**Tổng kết thiết kế:** 73 yêu cầu có thiết kế đáp ứng theo phạm vi, 29 yêu cầu chỉ đáp ứng một phần, 7 yêu cầu chưa có cơ chế tương ứng trên 14 bảng và 3 yêu cầu RAG hoãn khỏi AI Chat cơ bản (SR-062..064). Tổng cộng 112 yêu cầu; không đánh đồng số endpoint với số yêu cầu hệ thống.
 
 ## 11. Các điểm cần xác nhận trước khi lập trình
 
@@ -4832,6 +4903,7 @@ Trạng thái trong bảng này mô tả **mức bao phủ của bản thiết k
 5. Chiến lược mã hóa field text và quản lý khóa, backup, retention, xóa bản sao backup, contact verification qua email hay SMS.
 6. Nếu đề tài yêu cầu quản lý ca hỗ trợ, audit bất biến, quyền chia sẻ báo cáo có thời hạn, model registry hoặc quản trị RAG trực tiếp trên web: cần thêm schema. Không sử dụng JSON của bảng không liên quan làm nơi lưu thay thế.
 7. Thiết kế DB hiện tại không có password reset request log, retry_count delivery và link share. Chính sách cần thống nhất trước khi đưa hệ thống cho người dùng thật.
+8. Space cần cập nhật API để nhận history/context và tự chọn stage/strategy, trả JSON theo mục 3.5; chốt API Gradio thực tế, token budget, timeout và phiên bản prompt trước khi tích hợp. Không xem `/generate(message,strategy)` hiện tại là đã đáp ứng kiến trúc mới. Việc này không yêu cầu fine-tuning thêm model.
 
 ## 12. Checklist kiểm thử tối thiểu
 
@@ -4844,7 +4916,7 @@ Trạng thái trong bảng này mô tả **mức bao phủ của bản thiết k
 - [ ] **TC-07:** Rút consent ai_chat khi worker queued: worker kiểm tra lại và không dùng chat.
 - [ ] **TC-08:** Trend 7 ngày với chỉ 3 ngày ghi nhận → insufficient_data, không trả delta giả.
 - [ ] **TC-09:** Deep Analysis 202 queued; chỉ có report sau worker completed, failed không sinh fake result.
-- [ ] **TC-10:** Chatbot dùng đúng context đã có consent, không tự chẩn đoán; khi RAG/model lỗi dùng fallback.
+- [ ] **TC-10:** Chatbot dùng đúng history của session và context có consent, không tự chẩn đoán; model lỗi/timeout/output bị chặn dùng fallback template, không thêm lượt suy luận.
 - [ ] **TC-11:** Khả năng hỏi thêm tắt thì bot vẫn hỗ trợ, không ép check-in.
 - [ ] **TC-12:** Client retry tin nhắn không nhân đôi user/assistant message trong phạm vi idempotency đã cấu hình.
 - [ ] **TC-13:** Người dùng chủ động yêu cầu hỗ trợ → pending_review, không báo đã liên hệ khi chưa dispatch.
@@ -4856,6 +4928,13 @@ Trạng thái trong bảng này mô tả **mức bao phủ của bản thiết k
 - [ ] **TC-19:** Admin không lấy được journal/chat content qua admin endpoints.
 - [ ] **TC-20:** Data export chỉ gồm dữ liệu owner; data deletion xử lý đầy đủ các FK với chủ user.
 - [ ] **TC-21:** Ví dụ JSON trong tài liệu đều parse được, 204 không có body, API xuất file không bọc envelope.
+- [ ] **TC-22:** Một lượt chat thông thường chỉ gọi một model/một lần generate; stage selection, strategy selection và response generation nằm trong cùng lần gọi, không có intent/router/summary/JSON-repair call phụ.
+- [ ] **TC-23:** Output hợp lệ có đúng một stage trong 3 giá trị, một strategy trong 8 giá trị và response không rỗng; JSON/enum sai → fallback degraded với stage/strategy=null.
+- [ ] **TC-24:** Model có thể chuyển Exploration → Comforting → Action hoặc quay lại theo context; không ép chuyển stage bằng số lượt, không áp đặt gợi ý khi user chưa sẵn sàng.
+- [ ] **TC-25:** Session hoặc request tắt followup → không chọn questions/không sinh câu hỏi bổ sung (trừ nhánh an toàn); thiếu check-in không chặn hỗ trợ cảm xúc.
+- [ ] **TC-26:** Nhánh safety không chờ LLM, trả safety_override với stage/strategy=null; không tự gửi contact và không nhận là đã liên hệ khi chưa delivery.
+- [ ] **TC-27:** Context đúng thứ tự, message hiện tại xuất hiện một lần; history/context vượt token budget được giới hạn mà vẫn giữ system prompt và message hiện tại; không lấy nguồn đã revoke hoặc report outdated.
+- [ ] **TC-28:** Không có RAG index vẫn chat được; public metadata không chứa prompt, raw error, source_refs riêng tư hoặc chain-of-thought; feedback không kích hoạt huấn luyện model.
 
 ---
 

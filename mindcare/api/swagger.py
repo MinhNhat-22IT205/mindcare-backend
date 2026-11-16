@@ -14,6 +14,8 @@ from typing import Any
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
 
+from mindcare.chat_contract import STAGES, STRATEGIES
+
 
 API_PREFIX = "/api/v1"
 
@@ -296,6 +298,26 @@ def _operation(method: str, path: str, path_parameters: list[dict[str, Any]]) ->
     if path not in PUBLIC_PATHS:
         operation["security"] = [{"BearerAuth": []}]
 
+    if method == "post" and path == "/me/chat/sessions/{session_id}/messages":
+        operation["responses"]["503"] = {"$ref": "#/components/responses/ServiceUnavailable"}
+        operation["responses"].pop("200")
+        operation["responses"]["201"] = {
+            "description": "Saved user/assistant pair, including a local fallback when needed",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ChatTurnResponse"}}},
+        }
+        operation["responses"]["409"] = {
+            "description": "MESSAGE_IN_PROGRESS or DUPLICATE_MESSAGE_CONFLICT",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+        }
+        operation["responses"]["429"] = {
+            "description": "Chat rate limit exceeded",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+        }
+        operation["description"] = (
+            "Safety Check + session history/context → one ESConv generation → local output validation. "
+            "Returns stage/strategy/status; fallback labels are null. Requires the updated Space API."
+        )
+
     example = _body_example(method, path)
     if example is not None:
         operation["requestBody"] = {
@@ -311,6 +333,10 @@ def _operation(method: str, path: str, path_parameters: list[dict[str, Any]]) ->
                     "example": example,
                 }
             },
+        }
+    if method == "post" and path == "/me/chat/sessions/{session_id}/messages":
+        operation["requestBody"]["content"]["application/json"]["schema"] = {
+            "$ref": "#/components/schemas/ChatTurnRequest",
         }
     return operation
 
@@ -359,6 +385,45 @@ def build_openapi_schema(request: HttpRequest | None = None) -> dict[str, Any]:
                 }
             },
             "schemas": {
+                "ChatTurnRequest": {
+                    "type": "object", "additionalProperties": False,
+                    "required": ["message", "client_message_id"],
+                    "properties": {
+                        "message": {"type": "string", "minLength": 1, "maxLength": 4000},
+                        "client_message_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                        "allow_followup_question": {"type": "boolean", "default": True},
+                    },
+                },
+                "ChatMetadata": {
+                    "type": "object", "additionalProperties": False,
+                    "required": ["stage", "strategy", "status"],
+                    "properties": {
+                        "stage": {"type": "string", "nullable": True, "enum": [*STAGES, None]},
+                        "strategy": {"type": "string", "nullable": True, "enum": [*STRATEGIES, None]},
+                        "status": {"type": "string", "enum": ["ok", "degraded", "safety_override"]},
+                        "feedback": {"type": "object"},
+                    },
+                },
+                "ChatTurnResponse": {
+                    "type": "object", "required": ["data", "meta"],
+                    "properties": {
+                        "data": {"type": "object", "required": ["user_message", "assistant_message", "analysis_queued"],
+                                 "properties": {
+                                     "user_message": {"type": "object", "properties": {
+                                         "id": {"type": "string", "format": "uuid"},
+                                         "created_at": {"type": "string", "format": "date-time"},
+                                     }},
+                                     "assistant_message": {"type": "object", "properties": {
+                                         "id": {"type": "string", "format": "uuid"},
+                                         "role": {"type": "string", "enum": ["assistant"]},
+                                         "content": {"type": "string"},
+                                         "metadata": {"$ref": "#/components/schemas/ChatMetadata"},
+                                     }},
+                                     "analysis_queued": {"type": "boolean"},
+                                 }},
+                        "meta": {"type": "object", "properties": {"request_id": {"type": "string", "format": "uuid"}}},
+                    },
+                },
                 "SuccessResponse": {
                     "type": "object",
                     "properties": {
@@ -395,6 +460,7 @@ def build_openapi_schema(request: HttpRequest | None = None) -> dict[str, Any]:
                 "Forbidden": {"description": "Insufficient permission", "content": {"application/json": {"schema": error_schema}}},
                 "NotFound": {"description": "Resource not found", "content": {"application/json": {"schema": error_schema}}},
                 "ValidationError": {"description": "Validation failed", "content": {"application/json": {"schema": error_schema}}},
+                "ServiceUnavailable": {"description": "Chat safety or encryption service unavailable", "content": {"application/json": {"schema": error_schema}}},
             },
         },
     }

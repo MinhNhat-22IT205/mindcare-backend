@@ -1,8 +1,10 @@
 import json
 import re
+from io import BytesIO
 from datetime import timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from unittest.mock import patch
 
 from django.contrib.auth.hashers import make_password
 from django.conf import settings
@@ -21,7 +23,8 @@ from mindcare.services.alert_delivery import deliver_queued_alert
 
 
 @override_settings(MINDCARE_DATA_ENCRYPTION_KEY='MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=',
-                   MINDCARE_SAFETY_DETECTOR='mindcare.tests.test_api.no_signal')
+                   MINDCARE_SAFETY_DETECTOR='mindcare.tests.test_api.no_signal',
+                   MINDCARE_CHAT_RESPONDER='', MINDCARE_CHAT_OUTPUT_GUARD='')
 class APITests(TestCase):
     def setUp(self):
         self.user = User.objects.create(email='a@example.com', display_name='A',
@@ -155,6 +158,105 @@ class APITests(TestCase):
         self.assertEqual(self.call('post', path, payload, self.user).status_code, 201)
         self.assertEqual(ChatMessage.objects.filter(session_id=session['id']).count(), 2)
         self.assertNotIn(payload['message'], ChatMessage.objects.get(role='user').content)
+
+    @override_settings(
+        GROQ_API_KEY='test-key', GROQ_CHAT_MODEL='openai/gpt-oss-20b',
+        GROQ_SAFETY_MODEL='openai/gpt-oss-safeguard-20b', GROQ_TIMEOUT_SECONDS=5,
+        MINDCARE_SAFETY_DETECTOR='mindcare.integrations.groq_chat.detect_safety',
+        MINDCARE_CHAT_RESPONDER='mindcare.integrations.groq_chat.respond',
+        MINDCARE_CHAT_OUTPUT_GUARD='mindcare.integrations.groq_chat.guard_output',
+    )
+    def test_legacy_groq_contract_uses_fallback_and_retry_does_not_call_again(self):
+        session = self.call('post', '/api/v1/me/chat/sessions', {}, self.user).json()['data']
+        path = f"/api/v1/me/chat/sessions/{session['id']}/messages"
+        payload = {'message': 'Mình thấy hơi căng thẳng.', 'client_message_id': 'groq-test-1'}
+
+        def completion(value):
+            return BytesIO(json.dumps({'choices': [{'message': {'content': json.dumps(value)}}]}).encode())
+
+        with patch('mindcare.integrations.groq_chat.urlopen', side_effect=[
+            completion({'risk': 'none', 'reason': ''}),
+            completion({'content': 'Mình nghe bạn. Bạn muốn chia sẻ thêm không?',
+                        'intent': 'support', 'action': 'RESPOND'}),
+            completion({'safe': True}),
+        ]) as groq_request:
+            first = self.call('post', path, payload, self.user)
+            self.assertEqual(first.status_code, 201)
+            answer = first.json()['data']['assistant_message']
+            self.assertEqual(answer['metadata'], {'stage': None, 'strategy': None, 'status': 'degraded'})
+            self.assertNotEqual(answer['content'], 'Mình nghe bạn. Bạn muốn chia sẻ thêm không?')
+            self.assertEqual(self.call('post', path, payload, self.user).json()['data']['assistant_message'], answer)
+            self.assertEqual(groq_request.call_count, 1)
+            models = [json.loads(call.args[0].data)['model'] for call in groq_request.call_args_list]
+            self.assertEqual(models, ['openai/gpt-oss-safeguard-20b'])
+            self.assertEqual(groq_request.call_args_list[0].args[0].get_header('Authorization'),
+                             'Bearer test-key')
+            self.assertEqual(groq_request.call_args_list[0].args[0].get_header('User-agent'),
+                             'MindCare/1.0 (Groq Chat API)')
+        self.assertEqual(ChatMessage.objects.filter(session_id=session['id']).count(), 2)
+
+    @override_settings(
+        GROQ_API_KEY='test-key', GROQ_CHAT_MODEL='openai/gpt-oss-20b',
+        GROQ_SAFETY_MODEL='openai/gpt-oss-safeguard-20b', GROQ_TIMEOUT_SECONDS=5,
+        MINDCARE_SAFETY_DETECTOR='mindcare.integrations.groq_chat.detect_safety',
+        MINDCARE_CHAT_RESPONDER='mindcare.integrations.groq_chat.respond',
+        MINDCARE_CHAT_OUTPUT_GUARD='mindcare.integrations.groq_chat.guard_output',
+    )
+    def test_groq_output_guard_rejection_uses_fallback(self):
+        session = self.call('post', '/api/v1/me/chat/sessions', {}, self.user).json()['data']
+        payloads = [
+            {'risk': 'none', 'reason': ''},
+            {'content': 'Tôi chắc chắn bạn mắc bệnh.', 'intent': 'support', 'action': 'RESPOND'},
+            {'safe': False},
+        ]
+        responses = [BytesIO(json.dumps({'choices': [{'message': {
+            'content': json.dumps(value)}}]}).encode()) for value in payloads]
+        with patch('mindcare.integrations.groq_chat.urlopen', side_effect=responses):
+            response = self.call('post', f"/api/v1/me/chat/sessions/{session['id']}/messages",
+                                 {'message': 'Hôm nay mình mệt.',
+                                  'client_message_id': 'groq-test-guard'}, self.user)
+        self.assertEqual(response.status_code, 201)
+        answer = response.json()['data']['assistant_message']
+        self.assertEqual(answer['metadata']['status'], 'degraded')
+        self.assertNotIn('mắc bệnh', answer['content'])
+
+    @override_settings(
+        GROQ_API_KEY='test-key', GROQ_SAFETY_MODEL='openai/gpt-oss-safeguard-20b',
+        GROQ_TIMEOUT_SECONDS=5,
+        MINDCARE_SAFETY_DETECTOR='mindcare.integrations.groq_chat.detect_safety',
+        MINDCARE_CHAT_RESPONDER='mindcare.integrations.groq_chat.respond',
+    )
+    def test_groq_safety_signal_skips_chat_model(self):
+        session = self.call('post', '/api/v1/me/chat/sessions', {}, self.user).json()['data']
+        response_body = BytesIO(json.dumps({'choices': [{'message': {'content': json.dumps({
+            'risk': 'urgent', 'reason': 'Cần người hỗ trợ xem xét ngay.'
+        })}}]}).encode())
+        with patch('mindcare.integrations.groq_chat.urlopen', return_value=response_body) as groq_request:
+            response = self.call('post', f"/api/v1/me/chat/sessions/{session['id']}/messages",
+                                 {'message': 'Tôi cần được giúp đỡ ngay.',
+                                  'client_message_id': 'groq-test-safety'}, self.user)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()['data']['assistant_message']['metadata']['status'],
+                         'safety_override')
+        self.assertEqual(groq_request.call_count, 1)
+        self.assertEqual(SafetyAlert.objects.filter(user=self.user, status='pending_review').count(), 1)
+
+    @override_settings(
+        GROQ_API_KEY='', GROQ_TIMEOUT_SECONDS=5,
+        MINDCARE_SAFETY_DETECTOR='mindcare.integrations.groq_chat.detect_safety',
+    )
+    def test_groq_missing_key_fails_closed(self):
+        session = self.call('post', '/api/v1/me/chat/sessions', {}, self.user).json()['data']
+        response = self.call('post', f"/api/v1/me/chat/sessions/{session['id']}/messages",
+                             {'message': 'Xin chào', 'client_message_id': 'groq-test-no-key'}, self.user)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()['error']['code'], 'SAFETY_DETECTOR_UNAVAILABLE')
+        self.assertFalse(ChatMessage.objects.filter(session_id=session['id']).exists())
+
+    def test_chat_503_is_documented(self):
+        schema = build_openapi_schema(None)
+        responses = schema['paths']['/me/chat/sessions/{session_id}/messages']['post']['responses']
+        self.assertEqual(responses['503']['$ref'], '#/components/responses/ServiceUnavailable')
 
     def test_report_hidden_after_consent_revoked(self):
         self.call('post', '/api/v1/me/consents', {

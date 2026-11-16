@@ -1,14 +1,14 @@
-from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
-from django.utils.module_loading import import_string
 
-from mindcare.api.common import (api, body, boolean, choice, consent, decrypt, encrypt,
+from mindcare.api.common import (api, body, boolean, choice, decrypt,
                                  fail, invalidate_sources, owned, page, parse_uuid,
                                  rate_limit, respond, text_value)
 from mindcare.api.records import CHECKIN_FIELDS, checkin_fields
+from mindcare.chat_contract import PIPELINE_VERSION
 from mindcare.models import (AnalysisReport, AnalysisSource, ChatMessage, ChatSession,
-                             CheckIn, JournalEntry, SafetyAlert)
+                             CheckIn)
+from mindcare.services.chat import public_metadata, send_message
 
 
 def session_data(item):
@@ -28,38 +28,15 @@ def get_message(user, message_id):
     return message
 
 
-def public_metadata(message):
-    allowed = {'intent', 'action', 'rag_used', 'citations', 'safety_status', 'feedback'}
-    return {key: value for key, value in message.metadata.items() if key in allowed}
-
-
-def context_for(user):
-    """Only send data covered by current consent to the configured responder."""
-    context = {}
-    if not consent(user, 'chat_context'):
-        return context
-    if consent(user, 'ai_checkin'):
-        context['check_ins'] = list(CheckIn.objects.filter(user=user).order_by('-checkin_date')
-                                    .values('checkin_date', 'stress_level', 'mood_level',
-                                            'anxiety_level', 'energy_level', 'sleep_hours')[:7])
-    if consent(user, 'ai_journal'):
-        context['journals'] = [decrypt(j.content)[:1000] for j in
-                               JournalEntry.objects.filter(user=user).order_by('-created_at')[:3]]
-    if consent(user, 'ai_chat'):
-        context['recent_chat'] = [decrypt(m.content)[:1000] for m in
-                                  ChatMessage.objects.filter(session__user=user, role='user')
-                                  .order_by('-created_at')[:5]]
-    return context
-
-
 @api({'GET', 'POST'}, {'user'})
 def sessions(request):
     if request.method == 'POST':
         data = body(request, {'title'})
         title = text_value(data.get('title', ''), 'title', 120, blank=True)
         item = ChatSession.objects.create(user=request.api_user, title=title,
-                                          state_json={'pipeline_version': settings.MINDCARE_PIPELINE_VERSION,
-                                                      'followup_enabled': True})
+                                          state_json={'pipeline_version': PIPELINE_VERSION,
+                                                      'followup_enabled': True,
+                                                      'last_stage': None, 'last_strategy': None})
         return respond(request, session_data(item), 201)
     queryset = ChatSession.objects.filter(user=request.api_user).order_by('-updated_at', '-id')
     q = request.GET.get('q', '')
@@ -93,6 +70,7 @@ def session_detail(request, session_id):
     return respond(request, session_data(item))
 
 
+@transaction.non_atomic_requests
 @api({'GET', 'POST'}, {'user'})
 def messages(request, session_id):
     session = get_session(request.api_user, session_id)
@@ -124,92 +102,13 @@ def messages(request, session_id):
     data = body(request, {'message', 'allow_followup_question', 'client_message_id'},
                 {'message', 'client_message_id'})
     rate_limit(request, 'chat', 30, 60, str(request.api_user.id))
+    if isinstance(data['message'], str) and not data['message'].strip():
+        fail(422, 'EMPTY_MESSAGE')
     content = text_value(data['message'], 'message', 4000)
     client_id = text_value(data['client_message_id'], 'client_message_id', 128)
     allow_followup = boolean(data.get('allow_followup_question', True), 'allow_followup_question')
-    detector_path = getattr(settings, 'MINDCARE_SAFETY_DETECTOR', None)
-    if not detector_path:
-        fail(503, 'SAFETY_DETECTOR_UNAVAILABLE',
-             'Chưa thể xử lý tin nhắn an toàn. Nếu đang gặp nguy hiểm ngay lúc này, hãy liên hệ dịch vụ khẩn cấp tại nơi bạn sống hoặc một người bạn tin tưởng.')
-    try:
-        signal = import_string(detector_path)(content)
-    except Exception:
-        fail(503, 'SAFETY_DETECTOR_UNAVAILABLE',
-             'Chưa thể xử lý tin nhắn an toàn. Nếu đang gặp nguy hiểm ngay lúc này, hãy liên hệ dịch vụ khẩn cấp tại nơi bạn sống hoặc một người bạn tin tưởng.')
-    if signal is not None and not isinstance(signal, dict):
-        signal = {'severity': getattr(signal, 'severity', None),
-                  'reason': getattr(signal, 'reason', None)}
-    if signal is not None and (not isinstance(signal.get('severity'), str) or
-                               not isinstance(signal.get('reason'), str)):
-        fail(503, 'SAFETY_DETECTOR_UNAVAILABLE')
-    reply = None
-    proposal = None
-    if signal:
-        reply = 'Mình đã ghi nhận tín hiệu cần hỗ trợ. Nếu bạn đang gặp nguy hiểm ngay lúc này, hãy liên hệ dịch vụ khẩn cấp tại nơi bạn sống hoặc một người bạn tin tưởng. Yêu cầu hỗ trợ trong ứng dụng đang chờ xem xét.'
-        metadata = {'intent': 'safety', 'action': 'OFFER_HUMAN_SUPPORT', 'rag_used': False,
-                    'citations': [], 'safety_status': 'pending_review'}
-    else:
-        responder_path = getattr(settings, 'MINDCARE_CHAT_RESPONDER', None)
-        if responder_path:
-            try:
-                generated = import_string(responder_path)({
-                    'message': content, 'followup_enabled': session.state_json.get('followup_enabled', True)
-                    and allow_followup, 'context': context_for(request.api_user)})
-                reply = text_value(generated['content'], 'assistant response', 4000)
-                guard_path = getattr(settings, 'MINDCARE_CHAT_OUTPUT_GUARD', '')
-                if not guard_path or import_string(guard_path)(reply) is not True:
-                    raise ValueError('Assistant response did not pass output guard.')
-                metadata = {'intent': str(generated.get('intent', 'support'))[:64],
-                            'action': str(generated.get('action', 'RESPOND'))[:64],
-                            'rag_used': bool(generated.get('rag_used', False)), 'citations': [],
-                            'safety_status': 'screened'}
-                raw_proposal = generated.get('checkin_proposal')
-                if isinstance(raw_proposal, dict) and set(raw_proposal) <= CHECKIN_FIELDS | {'checkin_date'}:
-                    try:
-                        from mindcare.api.common import parse_date
-                        parse_date(raw_proposal['checkin_date'])
-                        checkin_fields({k: v for k, v in raw_proposal.items() if k in CHECKIN_FIELDS})
-                        proposal = raw_proposal
-                    except (KeyError, TypeError):
-                        proposal = None
-            except Exception:
-                reply = None
-        if reply is None:
-            reply = 'Mình chưa thể tạo phản hồi phù hợp lúc này. Bạn có thể thử lại sau; nếu cần hỗ trợ ngay, hãy liên hệ người bạn tin tưởng hoặc dịch vụ khẩn cấp tại nơi bạn sống.'
-            metadata = {'intent': 'support', 'action': 'RESPOND', 'rag_used': False,
-                        'citations': [], 'safety_status': 'degraded'}
-    with transaction.atomic():
-        session = ChatSession.objects.select_for_update().get(id=session.id)
-        previous = next((m for m in ChatMessage.objects.filter(session=session, role='user')
-                         if m.metadata.get('client_message_id') == client_id), None)
-        if previous:
-            if decrypt(previous.content) != content:
-                fail(409, 'DUPLICATE_MESSAGE_CONFLICT')
-            assistant = ChatMessage.objects.filter(reply_to_message=previous, role='assistant').first()
-            if assistant:
-                return respond(request, {'user_message': {'id': str(previous.id), 'created_at': previous.created_at},
-                                         'assistant_message': {'id': str(assistant.id), 'role': 'assistant',
-                                                               'content': decrypt(assistant.content),
-                                                               'metadata': public_metadata(assistant)},
-                                         'analysis_queued': False}, 201)
-            fail(409, 'DUPLICATE_MESSAGE_CONFLICT')
-        message = ChatMessage.objects.create(session=session, role='user', message_type='text',
-                                             content=encrypt(content), metadata={
-                                                 'client_message_id': client_id,
-                                                 **({'extracted_checkin_proposal': proposal,
-                                                     'proposal_status': 'pending'} if proposal else {})})
-        if signal:
-            SafetyAlert.objects.create(user=request.api_user, trigger_message=message,
-                                       trigger_type='chat_signal', severity=str(signal['severity'])[:32],
-                                       reason=encrypt(str(signal['reason'])[:1000]), status='pending_review')
-        assistant = ChatMessage.objects.create(session=session, reply_to_message=message,
-                                               role='assistant', message_type='text',
-                                               content=encrypt(reply), metadata=metadata)
-        session.save(update_fields=['updated_at'])
-    return respond(request, {'user_message': {'id': str(message.id), 'created_at': message.created_at},
-                             'assistant_message': {'id': str(assistant.id), 'role': 'assistant',
-                                                   'content': reply, 'metadata': metadata},
-                             'analysis_queued': False}, 201)
+    result = send_message(request.api_user, session.id, content, client_id, allow_followup)
+    return respond(request, result, 201)
 
 
 @api({'PATCH'}, {'user'})
@@ -224,7 +123,8 @@ def feedback(request, message_id):
         boolean(data['helpful'], 'helpful')
     if 'recommendation_status' in data:
         choice(data['recommendation_status'], {'saved', 'tried', 'skipped', 'none'})
-    item.metadata = {**item.metadata, 'feedback': {**data, 'user_feedback_at': timezone.now().isoformat()}}
+    item.metadata = {**item.metadata, 'feedback': {**item.metadata.get('feedback', {}), **data,
+                                                'user_feedback_at': timezone.now().isoformat()}}
     item.save(update_fields=['metadata'])
     return respond(request, {'message_id': str(item.id), 'feedback': data})
 
